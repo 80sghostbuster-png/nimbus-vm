@@ -47,6 +47,7 @@ CROSS
 if [[ ! -f "$BLD/config-host.mak" ]]; then
   cd "$BLD"
   "$SRC/configure" \
+    --cross-prefix= \
     --cc="$CC" \
     --host-cc=gcc \
     --cxx="$CXX" \
@@ -68,6 +69,9 @@ if [[ ! -f "$BLD/config-host.mak" ]]; then
     --disable-opengl \
     --disable-virglrenderer \
     --disable-vhost-user \
+    --disable-vhost-user-blk-server \
+    --disable-vhost-vdpa \
+    --disable-vhost-crypto \
     --disable-vhost-net \
     --disable-vhost-kernel \
     --disable-libnfs \
@@ -84,6 +88,8 @@ if [[ ! -f "$BLD/config-host.mak" ]]; then
     --disable-cap-ng \
     --disable-seccomp \
     --disable-modules \
+    --disable-plugins \
+    --disable-dbus-display \
     --disable-libudev \
     --disable-spice \
     --disable-brlapi \
