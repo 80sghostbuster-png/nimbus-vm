@@ -37,9 +37,7 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var osk: OnScreenKeyboard
     private lateinit var toolbar: LinearLayout
     private lateinit var status: TextView
-    private lateinit var bootOverlay: View
-    private lateinit var bootOverlayTitle: TextView
-    private lateinit var bootOverlayBody: TextView
+    private lateinit var bootElapsed: TextView
     private lateinit var serialPanel: android.widget.LinearLayout
     private lateinit var serialScroll: ScrollView
     private lateinit var serialLog: TextView
@@ -48,6 +46,9 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var btnSerial: Button
     private var bound = false
     private var placeholder = true
+    private var guestPainted = false
+    private var userWantsLog = true
+    private var userPinnedLog = false
     private val ui = Handler(Looper.getMainLooper())
     private var serialFile: File? = null
     private var serialIo: SerialConsole? = null
@@ -70,18 +71,14 @@ class DisplayActivity : AppCompatActivity() {
     }
     private val serialRunnable = object : Runnable {
         override fun run() {
-            if (serialPanel.visibility == View.VISIBLE || bootOverlay.visibility == View.VISIBLE) {
-                refreshSerial()
-                if (serialOpen() && serialIo?.isConnected != true) connectSerialIo()
-            }
+            refreshSerial()
+            if (serialOpen() && serialIo?.isConnected != true) connectSerialIo()
             ui.postDelayed(this, 500)
         }
     }
     private val elapsedRunnable = object : Runnable {
         override fun run() {
-            if (bootOverlay.visibility == View.VISIBLE && bootStartedAt != 0L) {
-                updateBootOverlay(lastExtractLog, lastSerialText)
-            }
+            if (bootStartedAt != 0L) updateBootElapsed()
             ui.postDelayed(this, 1000)
         }
     }
@@ -118,9 +115,8 @@ class DisplayActivity : AppCompatActivity() {
         osk = findViewById(R.id.osk)
         toolbar = findViewById(R.id.toolbar)
         status = findViewById(R.id.status)
-        bootOverlay = findViewById(R.id.bootOverlay)
-        bootOverlayTitle = findViewById(R.id.bootOverlayTitle)
-        bootOverlayBody = findViewById(R.id.bootOverlayBody)
+        status.visibility = View.GONE
+        bootElapsed = findViewById(R.id.bootElapsed)
         serialPanel = findViewById(R.id.serialPanel)
         serialScroll = findViewById(R.id.serialScroll)
         serialLog = findViewById(R.id.serialLog)
@@ -164,14 +160,18 @@ class DisplayActivity : AppCompatActivity() {
             true
         }
         btnSerial.setOnClickListener {
-            val show = serialPanel.visibility != View.VISIBLE
-            serialPanel.visibility = if (show) View.VISIBLE else View.GONE
-            if (show) {
+            if (serialOpen() && guestPainted) {
+                userWantsLog = false
+                userPinnedLog = false
+            } else {
+                userWantsLog = true
+                userPinnedLog = guestPainted
                 serialFollow = true
                 btnJumpLatest.visibility = View.GONE
                 refreshSerial()
                 connectSerialIo()
             }
+            applyMainView()
             routeOskKeys()
             layoutSerialAndOsk()
         }
@@ -181,11 +181,9 @@ class DisplayActivity : AppCompatActivity() {
         }
         screen.onPlaceholderChanged = { blank ->
             placeholder = blank
-            bootOverlay.visibility = if (blank) View.VISIBLE else View.GONE
-            if (!blank && status.visibility == View.VISIBLE) {
-                status.visibility = View.GONE
-            }
+            if (!blank) onGuestPainted()
         }
+        applyMainView()
         screen.multiTouchHandler = handler@{ contacts ->
             val svc = service ?: return@handler
             val w = screen.client?.width ?: 0
@@ -210,6 +208,40 @@ class DisplayActivity : AppCompatActivity() {
     }
 
     private fun serialOpen(): Boolean = serialPanel.visibility == View.VISIBLE
+
+    /**
+     * Main area is the live Serial/boot log until the guest framebuffer has
+     * non-black pixels, then it swaps to VNC. The Serial button toggles back.
+     * Never shows a "Display connected" placeholder.
+     */
+    private fun applyMainView() {
+        val showLog = userWantsLog || !guestPainted
+        serialPanel.visibility = if (showLog) View.VISIBLE else View.GONE
+        screen.visibility = if (showLog) View.INVISIBLE else View.VISIBLE
+        status.visibility = View.GONE
+        if (showLog) {
+            refreshSerial()
+            if (serialFollow) scrollSerialToBottom()
+        }
+    }
+
+    private fun onGuestPainted() {
+        if (guestPainted) return
+        guestPainted = true
+        if (!userPinnedLog) userWantsLog = false
+        applyMainView()
+    }
+
+    private fun appendLogError(msg: String) {
+        status.visibility = View.GONE
+        userWantsLog = true
+        applyMainView()
+        val line = if (serialLog.text.isNullOrEmpty()) msg else "\n$msg\n"
+        serialLog.append(line)
+        serialFollow = true
+        btnJumpLatest.visibility = View.GONE
+        scrollSerialToBottom()
+    }
 
     private fun connectSerialIo() {
         val svc = service ?: return
@@ -327,7 +359,8 @@ class DisplayActivity : AppCompatActivity() {
                         scrollSerialToBottom()
                     }
                 }
-                updateBootOverlay(extractText, serialOnly)
+                updateBootElapsed()
+                maybeAutoSwitchFromScreendump(serialOnly)
             }
         }
     }
@@ -340,43 +373,31 @@ class DisplayActivity : AppCompatActivity() {
         return "Elapsed %d:%02d.".format(m, s)
     }
 
-    private fun updateBootOverlay(extractLog: String, serialText: String) {
-        lastExtractLog = extractLog
-        lastSerialText = serialText
-        val low = (extractLog + "\n" + serialText).lowercase()
-        val extracted = extractLog.startsWith("Extracted ARM64")
-        val extractFailed = extractLog.contains("failed", ignoreCase = true) ||
-            extractLog.startsWith("No /install.a64")
-        val kernelStarted = "booting linux" in low || "linux version" in low ||
-            "efi stub:" in low || "earlycon:" in low
-        val title = when {
-            "select a language" in low || "choose the language" in low -> "Installer is running"
-            kernelStarted -> "Booting… (kernel)"
-            extracted -> "Booting… (installer)"
-            else -> "Booting… (firmware)"
-        }
-        val stalled = "auto-fallback" in low || "serial quiet" in low
-        val wait = " The display can stay dark for several minutes on a phone — watch this timer and open Serial for live QMP / ramfb counts."
-        val body = when {
-            extractFailed -> extractLog.trim() + " Open Serial for the QEMU command line and firmware log."
-            stalled -> "Serial stopped growing, so the kernel may have stalled. Auto-fallback will restart with the next CPU profile (default is cortex-a72 + thread=single)." + wait
-            kernelStarted -> "Kernel has started. Unpacking the installer initrd (~68 MB) on phone TCG can take many minutes; Serial should keep growing. A QMP line every 5s reports the CPU PC and, every 30s, how many non-black ramfb pixels have been painted." + wait
-            extracted -> "Installer kernel extracted. Serial should show “Booting Linux” once the kernel starts." + wait
-            else -> "Guest display is not active yet. The machine is still booting — open Serial for the live firmware log and the QEMU command line."
-        }
+    private fun updateBootElapsed() {
         val elapsed = elapsedLabel()
-        bootOverlayTitle.text = if (elapsed.isEmpty()) title else "$title  $elapsed"
-        bootOverlayBody.text = if (elapsed.isEmpty()) body else "$body $elapsed"
+        bootElapsed.text = elapsed
+    }
+
+    /** QMP screendump lines look like: ramfb=800x600 nonblack=1234/480000 */
+    private fun maybeAutoSwitchFromScreendump(serialText: String) {
+        if (guestPainted) return
+        val matches = NONBLACK_RE.findAll(serialText)
+        if (matches.any { (it.groupValues[1].toIntOrNull() ?: 0) > 0 }) {
+            onGuestPainted()
+        }
     }
 
     private fun actuallyStart() {
         val svc = service ?: return
-        status.visibility = View.VISIBLE
-        status.text = "Starting…"
-        bootOverlay.visibility = View.VISIBLE
+        status.visibility = View.GONE
         placeholder = true
+        guestPainted = false
+        userWantsLog = true
+        userPinnedLog = false
+        applyMainView()
         if (bootStartedAt == 0L) bootStartedAt = SystemClock.elapsedRealtime()
         bindSerialFile()
+        updateBootElapsed()
         thread {
             var tries = 0
             while (tries < 40 && !(svc.isThisVmRunning(vmId) || svc.engine.isRunning)) {
@@ -388,13 +409,10 @@ class DisplayActivity : AppCompatActivity() {
                 if (r.isFailure) {
                     val err = r.exceptionOrNull()?.message ?: "failed"
                     val log = svc.engine.qemuLogFile(vmId).takeIf { it.exists() }?.readText().orEmpty().takeLast(2000)
-                    runOnUiThread {
-                        status.text = "Failed to start\n$err\n$log"
-                    }
+                    runOnUiThread { appendLogError("Failed to start: $err\n$log") }
                     return@thread
                 }
             }
-            runOnUiThread { status.text = "Connecting display…" }
             connectVnc()
         }
     }
@@ -410,7 +428,7 @@ class DisplayActivity : AppCompatActivity() {
                 tries++
                 if (!svc.engine.isRunning && tries > 8) {
                     val log = svc.engine.qemuLogFile(vmId).takeIf { it.exists() }?.readText().orEmpty().takeLast(2000)
-                    runOnUiThread { status.text = "QEMU exited before the display came up.\n$log" }
+                    runOnUiThread { appendLogError("QEMU exited before the display came up.\n$log") }
                     return@thread
                 }
             }
@@ -422,12 +440,12 @@ class DisplayActivity : AppCompatActivity() {
                         }
                     }
                     override fun onConnected(width: Int, height: Int, desktopName: String) {
-                        runOnUiThread { status.text = "${width}×$height" }
+                        // Stay on the boot log until non-black pixels arrive.
+                        // Do not put "Display connected" or a resolution in the main area.
                     }
                     override fun onDisconnected(reason: String) {
                         runOnUiThread {
-                            status.visibility = View.VISIBLE
-                            status.text = "Display disconnected: $reason"
+                            appendLogError("Display disconnected: $reason")
                             // Auto-retry while QEMU is still running.
                             ui.postDelayed({
                                 if (svc.engine.isRunning) connectVnc()
@@ -440,14 +458,14 @@ class DisplayActivity : AppCompatActivity() {
                 runOnUiThread {
                     screen.client = client
                     osk.client = client
-                    status.text = "Display connected"
+                    status.visibility = View.GONE
                     ui.removeCallbacks(refreshRunnable)
                     ui.post(refreshRunnable)
                     connectSerialIo()
                     routeOskKeys()
                 }
             } catch (e: Exception) {
-                runOnUiThread { status.text = "VNC: ${e.message}" }
+                runOnUiThread { appendLogError("VNC: ${e.message}") }
             }
         }
     }
@@ -540,6 +558,7 @@ class DisplayActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_VM_ID = "vm_id"
         const val EXTRA_START = "start"
+        private val NONBLACK_RE = Regex("nonblack=([0-9]+)")
     }
 }
 

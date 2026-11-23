@@ -1,3 +1,21 @@
+# v0.2.7-test (versionCode 10) — live Serial in the main area, no "Display connected"
+
+Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. This is a UI fix on top of the 0.2.6-test engine. It is not a verified fix of the Pixel mid-kernel stall until Lex confirms the language screen on the phone.
+
+## What changed
+
+- The "Display connected" / "Starting…" / boot-overlay placeholder is gone from the main VM area. While the guest framebuffer is still black, that area is the live Serial/boot log: monospace, green on black, filling the landscape screen under the toolbar, incremental append, sticky-bottom follow, "Jump to latest."
+- The viewer switches to the guest framebuffer automatically when it has non-black pixels (VNC `isPlaceholderOrBlank` on each frame, and the existing QMP screendump `nonblack=N` line). The Serial button toggles back to the log.
+- All 0.2.6-test engine changes are kept: cortex-a72 + thread=single default, 60s Serial-stall fallback, QMP PC every 5s, ramfb screendump every 30s, VNC 0×0 FramebufferUpdateRequest, incremental Serial.
+
+## Display connected vs the real boot screen (checked for this build)
+
+No: the old "Display connected" label was not sitting opaque on top of a painted guest framebuffer, and VncView is not a SurfaceView (so the classic SurfaceView z-order-behind-window bug does not apply). VncView is a regular `View` that `onDraw`s the VNC bitmap. `status` was a wrap_content centered TextView with no opaque fill; `bootOverlay` was a bottom card. Both were hidden once a frame scored as non-blank. While they were visible, the VNC bitmap itself was still black / "display not active." The 0.2.6 0×0 update-request fix is what lets ramfb's later 800×600 DesktopSize arrive; after a resize the client reallocates the bitmap and `onFrame`/`layoutDest` redraw at the new size. The thing Lex was staring at was an empty black main area with that label, not a hidden installer — 0.2.7 puts the scrolling kernel log there instead.
+
+## What Lex should do
+
+Install `Nimbus-VM.apk` over 0.2.6-test (same signing key, versionCode 10). Boot the same Kali VM. You should immediately see Serial/kernel lines filling the landscape screen under the toolbar, not "Display connected." When the installer paints, the guest display should take over; Serial toggles the log back. Report whether Serial gets past `OF: reserved mem` and whether the language screen fills the landscape display with the toolbar visible.
+
 # v0.2.6-test (versionCode 9) — mid-kernel stall fallback and Serial stability
 
 Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4 (or whatever is still Latest — not this tag). Not a verified fix until Lex confirms the language screen on the phone.
