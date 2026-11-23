@@ -14,7 +14,7 @@ object VmDefaults {
         val total = (mi.totalMem / (1024 * 1024)).toInt()
         val half = total / 2
         val headroom = (total - 1536).coerceAtLeast(512)
-        val cap = if (windows) 8192 else 6144
+        val cap = if (windows) 8192 else 3072
         val floor = if (windows) minOf(4096, headroom) else 1024
         return half.coerceAtMost(headroom).coerceAtMost(cap).coerceAtLeast(floor)
     }

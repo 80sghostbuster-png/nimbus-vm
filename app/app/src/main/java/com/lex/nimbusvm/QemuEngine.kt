@@ -195,12 +195,30 @@ class QemuEngine(private val context: Context) {
         val fw = firmwareDir()
         val data = qemuDataDir()
         val work = workDir(cfg.vmId)
+        // Extract before choosing -m / display: installer boots cap RAM and
+        // use ramfb. Re-runs every ISO boot so a 0.2.0/0.2.1/0.2.3 VM is
+        // re-detected.
+        val extractFile = File(work, "installer-extract.txt")
+        val extracted = if (cfg.arch == Arch.ARM64 && cfg.iso != null) {
+            IsoInspector.tryExtractArm64Installer(cfg.iso, File(work, "installer")).also {
+                extractFile.writeText(it.log + "\n")
+                Log.i(TAG, it.log)
+            }
+        } else {
+            extractFile.writeText("No ARM64 ISO attached; not extracting an installer kernel.\n")
+            null
+        }
+        val installer = extracted?.installer
+        // 5–6 GB (half of a typical phone) plus -cpu max is a heavy TCG
+        // combination for a 46 MB vmlinuz. Cap installer RAM; keep the
+        // user's setting for disk/firmware boots.
+        val memoryMb = if (installer != null) minOf(cfg.memoryMb, 2048) else cfg.memoryMb
         val args = mutableListOf(
             qemu.absolutePath,
             "-L", data.absolutePath,
             "-accel", "tcg,thread=multi,tb-size=128",
             "-smp", cfg.cpus.toString(),
-            "-m", cfg.memoryMb.toString(),
+            "-m", memoryMb.toString(),
             "-display", "none",
             "-chardev", "socket,id=serial0,path=${File(work, "serial.sock").absolutePath},server=on,wait=off,logfile=${serialFile.absolutePath},logappend=on",
             "-serial", "chardev:serial0",
@@ -224,24 +242,15 @@ class QemuEngine(private val context: Context) {
         // ARM64 debian-installer ISOs: boot the gtk (or text) kernel directly
         // so efifb/ramfb stay alive. GRUB's linux loader does not fill
         // screen_info, and ACPI SPCR would otherwise make d-i prefer the UART.
-        val extractFile = File(work, "installer-extract.txt")
-        val extracted = if (cfg.arch == Arch.ARM64 && cfg.iso != null) {
-            IsoInspector.tryExtractArm64Installer(cfg.iso, File(work, "installer")).also {
-                extractFile.writeText(it.log + "\n")
-                Log.i(TAG, it.log)
-            }
-        } else {
-            extractFile.writeText("No ARM64 ISO attached; not extracting an installer kernel.\n")
-            null
-        }
-        val installer = extracted?.installer
+        // ramfb is programmed by AAVMF via fw_cfg; do not drop pflash here
+        // (a no-firmware boot leaves "Guest has not initialized the display").
         args += if (cfg.iso != null) listOf("-boot", "order=cd") else listOf("-boot", "order=c")
         when (cfg.arch) {
             Arch.ARM64 -> {
                 val acpi = if (installer != null) "off" else "on"
                 args += listOf(
                     "-machine", "virt,gic-version=3,virtualization=off,acpi=$acpi",
-                    "-cpu", "max",
+                    "-cpu", "max,pauth-impdef=on",
                 )
                 if (installer != null) {
                     // -kernel installer (gtk or text): ramfb provides /dev/fb0

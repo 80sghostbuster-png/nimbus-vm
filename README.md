@@ -30,7 +30,7 @@ Defaults for ARM64 guests (also used in the engine tests):
 - `-cpu max` on `virt,gic-version=3`
 - virtio-blk (`cache=writeback,aio=threads,discard=unmap`)
 - virtio-net with slirp (user-mode networking / internet)
-- Display: ARM64 debian-installer ISOs (Kali, Debian netinst, …) boot the gtk installer via `-kernel` on `ramfb` (VNC `display=ramfb0`) so the language screen has a framebuffer; disk and generic ISO boots keep virtio-gpu (VNC `gpu0`). Serial shows the installer-extract log, the QEMU command line, and the firmware/installer serial log (`console=tty0` so debian-installer keeps the framebuffer). qemu-xhci + usb-kbd + usb-tablet, virtio-multitouch. The Serial panel is interactive.
+- Display: ARM64 debian-installer ISOs (Kali, Debian netinst, …) boot the gtk installer via `-kernel` on `ramfb` (VNC `display=ramfb0`) with AAVMF pflash so the language screen has a framebuffer; disk and generic ISO boots keep virtio-gpu (VNC `gpu0`). Installer boots cap RAM at 2048 MB and use `-cpu max,pauth-impdef=on`. Serial shows the extract log, the QEMU command line, and kernel progress (`earlycon=pl011,0x9000000` plus `console=tty0`). qemu-xhci + usb-kbd + usb-tablet, virtio-multitouch. The Serial panel is interactive.
 - virtio-9p shared folders
 - AAVMF UEFI; `tpm-tis-device` + swtpm for Windows 11 on ARM
 

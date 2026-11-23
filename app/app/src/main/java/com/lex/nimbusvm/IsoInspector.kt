@@ -265,15 +265,13 @@ object IsoInspector {
                 else -> kept.add(p)
             }
         }
-        // console=tty0 only. Adding console=ttyAMA0 (even with tty0 last)
-        // makes debian-installer print "Framebuffer not available; disabling
-        // graphical frontend" and run the text UI on the UART, leaving ramfb
-        // stuck on kernel messages. The Serial panel instead shows the
-        // extract log and the QEMU command line to distinguish -kernel from
-        // firmware/GRUB.
+        // earlycon writes kernel progress to Serial, then disables itself
+        // when tty0/efifb comes up. Do not add console=ttyAMA0: that makes
+        // debian-installer disable the graphical frontend.
         val insertAt = kept.indexOf("---").let { if (it < 0) kept.size else it }
         kept.add(insertAt, "acpi=off")
-        kept.add(insertAt + 1, "console=tty0")
+        kept.add(insertAt + 1, "earlycon=pl011,0x9000000")
+        kept.add(insertAt + 2, "console=tty0")
         return kept.joinToString(" ")
     }
 

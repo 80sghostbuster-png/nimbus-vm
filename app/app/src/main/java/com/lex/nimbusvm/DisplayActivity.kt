@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -41,6 +42,9 @@ class DisplayActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var serialFile: File? = null
     private var serialIo: SerialConsole? = null
+    private var bootStartedAt = 0L
+    private var lastExtractLog = ""
+    private var lastSerialText = ""
     private val refreshRunnable = object : Runnable {
         override fun run() {
             val c = vnc
@@ -60,6 +64,14 @@ class DisplayActivity : AppCompatActivity() {
             ui.postDelayed(this, 500)
         }
     }
+    private val elapsedRunnable = object : Runnable {
+        override fun run() {
+            if (bootOverlay.visibility == View.VISIBLE && bootStartedAt != 0L) {
+                updateBootOverlay(lastExtractLog, lastSerialText)
+            }
+            ui.postDelayed(this, 1000)
+        }
+    }
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -70,6 +82,7 @@ class DisplayActivity : AppCompatActivity() {
                 startOnBind = false
                 actuallyStart()
             } else {
+                if (bootStartedAt == 0L) bootStartedAt = SystemClock.elapsedRealtime()
                 connectVnc()
             }
         }
@@ -157,6 +170,7 @@ class DisplayActivity : AppCompatActivity() {
         bindService(i, conn, Context.BIND_AUTO_CREATE)
         if (startOnBind) VmService.start(this, vmId)
         ui.post(serialRunnable)
+        ui.post(elapsedRunnable)
     }
 
     private fun bindSerialFile() {
@@ -224,24 +238,39 @@ class DisplayActivity : AppCompatActivity() {
         }
     }
 
+    private fun elapsedLabel(): String {
+        if (bootStartedAt == 0L) return ""
+        val sec = ((SystemClock.elapsedRealtime() - bootStartedAt) / 1000L).coerceAtLeast(0L)
+        val m = sec / 60L
+        val s = sec % 60L
+        return "Elapsed %d:%02d.".format(m, s)
+    }
+
     private fun updateBootOverlay(extractLog: String, serialText: String) {
+        lastExtractLog = extractLog
+        lastSerialText = serialText
         val low = (extractLog + "\n" + serialText).lowercase()
         val extracted = extractLog.startsWith("Extracted ARM64")
         val extractFailed = extractLog.contains("failed", ignoreCase = true) ||
             extractLog.startsWith("No /install.a64")
+        val kernelStarted = "booting linux" in low || "linux version" in low ||
+            "efi stub:" in low || "earlycon:" in low
         val title = when {
             "select a language" in low || "choose the language" in low -> "Installer is running"
-            "linux version" in low || "efi stub:" in low -> "Booting… (kernel)"
+            kernelStarted -> "Booting… (kernel)"
             extracted -> "Booting… (installer)"
             else -> "Booting… (firmware)"
         }
+        val wait = " The display can stay dark for a few minutes on a phone — wait for this timer, and open Serial for live progress."
         val body = when {
             extractFailed -> extractLog.trim() + " Open Serial for the QEMU command line and firmware log."
-            extracted -> "Installer kernel extracted. The display can stay dark until the guest paints — open Serial for kernel logs and the QEMU command line."
+            kernelStarted -> "Kernel has started. Waiting for the installer to paint." + wait
+            extracted -> "Installer kernel extracted. Serial should show “Booting Linux” once the kernel starts." + wait
             else -> "Guest display is not active yet. The machine is still booting — open Serial for the live firmware log and the QEMU command line."
         }
-        bootOverlayTitle.text = title
-        bootOverlayBody.text = body
+        val elapsed = elapsedLabel()
+        bootOverlayTitle.text = if (elapsed.isEmpty()) title else "$title  $elapsed"
+        bootOverlayBody.text = if (elapsed.isEmpty()) body else "$body $elapsed"
     }
 
     private fun actuallyStart() {
@@ -250,6 +279,7 @@ class DisplayActivity : AppCompatActivity() {
         status.text = "Starting…"
         bootOverlay.visibility = View.VISIBLE
         placeholder = true
+        if (bootStartedAt == 0L) bootStartedAt = SystemClock.elapsedRealtime()
         bindSerialFile()
         thread {
             var tries = 0
@@ -370,6 +400,7 @@ class DisplayActivity : AppCompatActivity() {
     override fun onDestroy() {
         ui.removeCallbacks(refreshRunnable)
         ui.removeCallbacks(serialRunnable)
+        ui.removeCallbacks(elapsedRunnable)
         vnc?.close()
         serialIo?.close()
         if (bound) unbindService(conn)

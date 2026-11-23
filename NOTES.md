@@ -1,3 +1,34 @@
+# v0.2.4 (versionCode 7) — installer boot progress and TCG load
+
+Box-verified Sunday Nov 22, 2026, America/Chicago. Not yet phone-tested at publish time.
+
+Lex's v0.2.3 phone boot extracted the gtk initrd successfully (overlay “Booting… (installer)”) but the display stayed black with “Display connected”, and Serial never moved past the AAVMF banner and `[=3h`. The phone argv was the 0.2.3 installer path: AAVMF pflash + `-kernel` + ramfb, `-cpu max`, `-accel tcg,thread=multi`, `-smp 2`, `-m 5775` (half of device RAM), `acpi=off console=tty0`.
+
+## What the box showed
+
+The 0.2.3 box proofs already used pflash + `-kernel` (firmware still runs, then the EFI stub). Reproducing the *exact* phone argv (`-m 5775`, `-cpu max`, `thread=multi`, pflash, ramfb, 9p, the same append) reached the gtk “Select a language” screen in about **40 seconds**. Serial stayed on the firmware banner only — so a quiet Serial panel does not mean the kernel failed to start when `console=tty0` is the only console. A no-pflash `-kernel` boot starts Linux immediately and `earlycon` works, but ramfb stays on “Guest has not initialized the display (yet.)” because AAVMF is what programs ramfb via fw_cfg. Firmware is kept.
+
+## What changed
+
+- **Keep pflash** for installer `-kernel` boots so ramfb/efifb works.
+- **`earlycon=pl011,0x9000000`** plus `console=tty0` last (`acpi=off`). Serial shows `Booting Linux` after the AAVMF banner; earlycon then disables itself when tty0/efifb comes up, so debian-installer still uses the framebuffer (unlike `console=ttyAMA0`, which disabled the gtk frontend).
+- **`-cpu max,pauth-impdef=on`** on ARM64. Pointer auth on `-cpu max` is very expensive in TCG.
+- **Installer RAM cap 2048 MB** in `buildArgv` (a VM saved at 5775 is capped only for the `-kernel` installer boot; disk/firmware boots keep the user's size). New non-Windows VMs default to at most 3072 MB.
+- **Elapsed time** on the boot overlay, updated every second.
+
+## Box proof
+
+Official Kali 2026.3 installer ISO, `-kernel` + gtk initrd, ramfb, `display=ramfb0`, pflash, `acpi=off`, append `acpi=off earlycon=pl011,0x9000000 console=tty0`, `-cpu max,pauth-impdef=on`, `-m 2048`, `-accel tcg,thread=multi`, `-smp 2`. Serial showed the AAVMF banner, then `Booting Linux` / earlycon, then earlycon disabled at tty0. The app VNC path reached “Select a language” in about **39 seconds**. Proof: `screenshots/kali-024-graphical-install-vnc.png`. APK 39,161,364 bytes, SHA-256 `db6b604b8c0b2d9003e61387b4f752cb2383a9d89b44a97e0179afc615dee01f`.
+
+The box emulates ARM64 on x86 TCG, which is typically slower than same-arch TCG on Lex's phone — but a phone can still be slower under thermal or memory pressure. Expect Serial to show `Booting Linux` within a minute or two, and the language screen often within a few minutes (wait up to five). The overlay timer is the wait cue. If Serial *never* moves past the AAVMF banner after several minutes, firmware has not handed off to the kernel yet.
+
+## What Lex should do
+
+Install `Nimbus-VM.apk` over 0.2.3 (same signing key, versionCode 7). The existing Kali VM is fine — installer RAM is capped automatically. Boot it and watch the overlay timer. Open Serial: after the UEFI banner you should see `Booting Linux` and earlycon lines. The display can go black briefly between kernel messages and the gtk screen (the box did that around the 24 second mark). If the language screen is not up in about five minutes, or Serial never shows `Booting Linux`, report that with a Serial screenshot and the elapsed time.
+
+0.3.0 work remains paused until this phone bug is confirmed fixed.
+
+
 # v0.2.3 (versionCode 6) — phone ISO-boot hotfix
 
 Box-verified Sunday Nov 22, 2026, America/Chicago. Not yet phone-tested at publish time.
