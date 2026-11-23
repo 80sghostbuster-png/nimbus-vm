@@ -19,8 +19,8 @@ android {
         applicationId = "com.lex.nimbusvm"
         minSdk = (findProperty("proofMinSdk") as String?)?.toIntOrNull() ?: 28
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.2.8-test"
+        versionCode = 12
+        versionName = "0.2.9-test"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -43,6 +43,10 @@ android {
             }
         }
     }
+
+    // -PtestBuildType=release signs the androidTest APK with the release key,
+    // which real devices require (instrumentation signature must match).
+    testBuildType = (findProperty("testBuildType") as String?) ?: "debug"
 
     buildTypes {
         getByName("release") {

@@ -21,11 +21,16 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class BootProofTest {
 
-    @Test(timeout = 45 * 60 * 1000)
+    @Test(timeout = 14 * 60 * 1000)
     fun downloadAndBootInstaller() {
         val inst = InstrumentationRegistry.getInstrumentation()
         val args = InstrumentationRegistry.getArguments()
-        val url = args.getString("isoUrl") ?: DEFAULT_ISO
+        val pushed = args.getString("isoPushed")
+        val url = if (pushed != null) {
+            "file://" + copyPushedIso(inst, pushed).absolutePath
+        } else {
+            args.getString("isoUrl") ?: DEFAULT_ISO
+        }
         val sha = args.getString("isoSha256") ?: DEFAULT_SHA
         val target = inst.targetContext
         BootSettings.setMode(target, BootSettings.MODE_AUTO)
@@ -45,8 +50,9 @@ class BootProofTest {
         val device = UiDevice.getInstance(inst)
         device.waitForIdle()
 
-        // On-device download of ~233 MB can take several minutes on a phone.
-        val downloadDeadline = System.currentTimeMillis() + 20 * 60 * 1000L
+        // Short real-device runs: download + extract must finish in ~6 min.
+        val testStart = System.currentTimeMillis()
+        val downloadDeadline = testStart + (args.getString("setupMin")?.toLongOrNull() ?: 6L) * 60 * 1000L
         var shot = 0
         while (System.currentTimeMillis() < downloadDeadline) {
             shot++
@@ -61,15 +67,33 @@ class BootProofTest {
             qemuRunning(target) || serialHas(target, "[nimbus self-test]"),
         )
 
-        val bootDeadline = System.currentTimeMillis() + BOOT_WAIT_MS
+        val bootMin = args.getString("bootMin")?.toLongOrNull() ?: 0L
+        val bootDeadline = if (bootMin > 0) System.currentTimeMillis() + bootMin * 60 * 1000L
+            else testStart + 13 * 60 * 1000L
         while (System.currentTimeMillis() < bootDeadline) {
             shot++
             takeShot(inst, outDirs, shot, "boot")
             pullLogs(target, outDirs)
+            keepScreendump(target, outDirs, shot)
             Thread.sleep(SHOT_EVERY_MS)
         }
         pullLogs(target, outDirs)
         writeSummary(target, outDirs)
+    }
+
+    /**
+     * Test Lab pushes --other-files as the shell user, so the app can't open
+     * them. Stream the file through a shell `cat` into the app's own dir.
+     */
+    private fun copyPushedIso(inst: android.app.Instrumentation, path: String): File {
+        val dir = inst.targetContext.getExternalFilesDir("iso") ?: inst.targetContext.filesDir
+        dir.mkdirs()
+        val out = File(dir, File(path).name)
+        val pfd = inst.uiAutomation.executeShellCommand("cat $path")
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { inp ->
+            FileOutputStream(out).use { o -> inp.copyTo(o, 1 shl 20) }
+        }
+        return out
     }
 
     private fun outputDirs(target: android.content.Context): List<File> {
@@ -117,7 +141,7 @@ class BootProofTest {
     }
 
     private fun pullLogs(target: android.content.Context, dirs: List<File>) {
-        val names = listOf("serial.log", "qemu-stderr.log", "selftest.txt", "installer-extract.txt")
+        val names = listOf("serial.log", "qemu-stderr.log", "selftest.txt", "installer-extract.txt", "qmp-screendump.png")
         workDirs(target).forEach { vm ->
             for (name in names) {
                 val src = File(vm, name)
@@ -135,6 +159,20 @@ class BootProofTest {
             for (dir in dirs) {
                 try {
                     src.copyTo(File(dir, "app-selftest.txt"), overwrite = true)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** Keep QEMU's own view of the guest framebuffer next to each app screenshot. */
+    private fun keepScreendump(target: android.content.Context, dirs: List<File>, n: Int) {
+        workDirs(target).forEach { vm ->
+            val src = File(vm, "qmp-screendump.png")
+            if (!src.exists()) return@forEach
+            for (dir in dirs) {
+                try {
+                    src.copyTo(File(dir, "qmp-%02d.png".format(n)), overwrite = true)
                 } catch (_: Exception) {
                 }
             }
@@ -171,7 +209,6 @@ class BootProofTest {
             "https://deb.debian.org/debian/dists/stable/main/installer-arm64/current/images/netboot/gtk/mini.iso"
         const val DEFAULT_SHA =
             "391245851f4dc87f8d3d4323f80a5bf26fbff717de49139278a58f551dd6a600"
-        const val BOOT_WAIT_MS = 10 * 60 * 1000L
-        const val SHOT_EVERY_MS = 30_000L
+        const val SHOT_EVERY_MS = 20_000L
     }
 }

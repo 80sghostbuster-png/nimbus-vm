@@ -18,7 +18,7 @@ import kotlin.math.hypot
 import kotlin.math.sqrt
 
 /**
- * Guest framebuffer scaled to fill the view (aspect preserved, center-cropped)
+ * Guest framebuffer stretched to fill the whole view (no bars, no crop)
  * with first-class touch.
  *
  * Direct (default): tap = left click at the finger (usb-tablet via VNC),
@@ -485,20 +485,18 @@ class VncView @JvmOverloads constructor(
         )
     }
 
-    /** Scale the guest so it covers the view; crop overflow (no letterbox bars). */
+    /**
+     * Fill the whole view edge to edge: no black bars and nothing cropped.
+     * The guest picks its own mode (ramfb/efifb is 800x600), so on a wide
+     * phone this stretches horizontally; touch mapping uses dest's own
+     * width/height, so taps still land on the right guest pixel.
+     */
     private fun cover(vw: Int, vh: Int, iw: Int, ih: Int, out: Rect) {
         if (vw <= 0 || vh <= 0 || iw <= 0 || ih <= 0) {
             out.set(0, 0, 0, 0)
             return
         }
-        // Fit the whole guest screen (full height in landscape) so the newest
-        // console line at the bottom is never cropped; pinch to zoom in.
-        val scale = minOf(vw.toFloat() / iw, vh.toFloat() / ih)
-        val w = (iw * scale).toInt()
-        val h = (ih * scale).toInt()
-        val l = (vw - w) / 2
-        val t = (vh - h) / 2
-        out.set(l, t, l + w, t + h)
+        out.set(0, 0, vw, vh)
     }
 
     private fun span(event: MotionEvent): Float {

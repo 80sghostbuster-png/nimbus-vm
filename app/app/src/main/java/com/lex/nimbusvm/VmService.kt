@@ -1,6 +1,5 @@
 package com.lex.nimbusvm
 
-import android.graphics.BitmapFactory
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -99,6 +98,9 @@ class VmService : Service() {
         stopSelf()
     }
 
+    /** Latest QMP screendump summary for the on-screen diagnostics. */
+    @Volatile var lastFbDiag: String = "guest fb (QMP) pending"
+
     fun isThisVmRunning(id: String): Boolean = currentId == id && engine.isRunning
 
     private fun startMonitor(id: String, serial: File, profile: BootProfile) {
@@ -107,7 +109,8 @@ class VmService : Service() {
         val startedAt = System.currentTimeMillis()
         val auto = BootSettings.mode(this) == BootSettings.MODE_AUTO
         val stderr = engine.qemuLogFile(id)
-        val dumpFile = File(engine.workDir(id), "qmp-screendump.png")
+        val dumpFile = File(engine.workDir(id), "qmp-screendump.ppm")
+        val dumpPng = File(engine.workDir(id), "qmp-screendump.png")
         monitorThread = Thread({
             var bannerAt = 0L
             var kernelAt = 0L
@@ -134,19 +137,24 @@ class VmService : Service() {
                     "qmp-error: ${e.message}"
                 }
                 var extra = ""
-                if (now - lastDumpAt >= 30_000L) {
+                if (now - lastDumpAt >= 10_000L) {
                     lastDumpAt = now
                     extra = try {
-                        engine.screendump(dumpFile)
-                        val counted = countNonBlackPixels(dumpFile)
+                        dumpFile.delete()
+                        val reply = engine.screendump(dumpFile)
+                        val counted = countNonBlackPpm(dumpFile, dumpPng)
                         if (counted != null) {
                             val (nonBlack, total, w, h) = counted
                             if (nonBlack > 64) painted = true
+                            lastFbDiag = "guest fb (QMP) ${w}x${h} nonblack=$nonBlack/$total @${elapsedSec}s"
                             " ramfb=${w}x${h} nonblack=$nonBlack/$total"
                         } else {
-                            " ramfb=screendump-unreadable"
+                            val why = reply.take(80).replace('\n', ' ')
+                            lastFbDiag = "guest fb (QMP) unreadable @${elapsedSec}s $why"
+                            " ramfb=screendump-unreadable $why"
                         }
                     } catch (e: Exception) {
+                        lastFbDiag = "guest fb (QMP) error: ${e.message}"
                         " ramfb=screendump-error: ${e.message}"
                     }
                 }
@@ -174,13 +182,17 @@ class VmService : Service() {
                     kernelAt = now
                     engine.appendNote(
                         serial,
-                        "[nimbus] kernel output seen at ${elapsedSec}s. The installer initrd is large (~68 MB); unpacking it on a phone can take many minutes. Serial should keep growing — if it stays quiet for 60s, auto-fallback will try the next profile.",
+                        "[nimbus] kernel output seen at ${elapsedSec}s. Kernel text continues on the VM display (and on Serial via console=ttyAMA0). Auto-fallback is off from here: a quiet Serial after the kernel starts is not a hang.",
                     )
                     lastSerialLen = if (serial.exists()) serial.length() else lastSerialLen
                     kernelHinted = true
                 }
                 if (!auto) continue
                 if (painted) continue
+                // Once the kernel runs, never restart on Serial silence: after
+                // "bootconsole [pl11] disabled" a console=tty0 kernel is legitimately
+                // quiet on Serial (0.2.8 restarted healthy boots after 60s).
+                if (kernelAt != 0L) continue
                 val stalled = now - lastGrowthAt >= BootSettings.STALL_TIMEOUT_MS
                 if (!stalled) continue
                 val next = BootSettings.nextAutoProfile(profile)
@@ -208,25 +220,49 @@ class VmService : Service() {
     }
 
     /** @return non-black count, total pixels, width, height */
-    private fun countNonBlackPixels(file: File): Quad? {
-        if (!file.exists() || file.length() < 32) return null
-        val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-        try {
-            val w = bmp.width
-            val h = bmp.height
-            if (w <= 0 || h <= 0) return null
-            val row = IntArray(w)
-            var n = 0
-            for (y in 0 until h) {
-                bmp.getPixels(row, 0, w, 0, y, w, 1)
-                for (c in row) {
-                    if ((c and 0x00ffffff) != 0) n++
-                }
+    /**
+     * QMP screendump in QEMU's default PPM (P6) format: the Android QEMU
+     * build has no libpng, so format=png failed and the diag always said
+     * "unreadable". Counts non-black pixels and writes a PNG copy for tests.
+     */
+    private fun countNonBlackPpm(file: File, pngOut: File): Quad? {
+        if (!file.exists() || file.length() < 16) return null
+        val bytes = file.readBytes()
+        var pos = 0
+        fun token(): String {
+            while (pos < bytes.size) {
+                val c = bytes[pos].toInt().toChar()
+                if (c == '#') { while (pos < bytes.size && bytes[pos].toInt() != '\n'.code) pos++ }
+                else if (c.isWhitespace()) pos++ else break
             }
-            return Quad(n, w * h, w, h)
-        } finally {
-            bmp.recycle()
+            val start = pos
+            while (pos < bytes.size && !bytes[pos].toInt().toChar().isWhitespace()) pos++
+            return String(bytes, start, pos - start, Charsets.US_ASCII)
         }
+        if (token() != "P6") return null
+        val w = token().toIntOrNull() ?: return null
+        val h = token().toIntOrNull() ?: return null
+        val max = token().toIntOrNull() ?: return null
+        pos++ // single whitespace before raster
+        if (w <= 0 || h <= 0 || max != 255 || bytes.size < pos + w * h * 3) return null
+        var n = 0
+        val argb = IntArray(w * h)
+        var i = pos
+        for (k in 0 until w * h) {
+            val r = bytes[i].toInt() and 0xff
+            val g = bytes[i + 1].toInt() and 0xff
+            val b = bytes[i + 2].toInt() and 0xff
+            if ((r or g or b) != 0) n++
+            argb[k] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+            i += 3
+        }
+        try {
+            val bmp = android.graphics.Bitmap.createBitmap(argb, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            pngOut.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            bmp.recycle()
+        } catch (_: Exception) {
+        }
+        return Quad(n, w * h, w, h)
     }
 
     private data class Quad(val a: Int, val b: Int, val c: Int, val d: Int)

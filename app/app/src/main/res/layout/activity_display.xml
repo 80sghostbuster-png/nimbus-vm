@@ -21,6 +21,19 @@
         android:textSize="14sp"
         android:visibility="gone" />
 
+    <TextView
+        android:id="@+id/diag"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="4dp"
+        android:background="#99000000"
+        android:fontFamily="monospace"
+        android:padding="4dp"
+        android:text=""
+        android:textColor="#9FE89F"
+        android:textSize="10sp" />
+
     <LinearLayout
         android:id="@+id/serialPanel"
         android:layout_width="match_parent"

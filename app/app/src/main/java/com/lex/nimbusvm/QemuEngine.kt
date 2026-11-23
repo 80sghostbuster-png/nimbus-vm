@@ -625,7 +625,8 @@ class QemuEngine(private val context: Context) {
     fun resume() = qmp("cont")
     fun screendump(dest: File): String {
         dest.parentFile?.mkdirs()
-        return qmp("screendump", JSONObject().put("filename", dest.absolutePath).put("format", "png"))
+        // Default format (PPM): the Android build has no libpng.
+        return qmp("screendump", JSONObject().put("filename", dest.absolutePath))
     }
 
     /**

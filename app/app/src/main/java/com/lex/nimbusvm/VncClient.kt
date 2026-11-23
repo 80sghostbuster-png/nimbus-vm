@@ -228,13 +228,13 @@ class VncClient(
                         inn.readByte()
                         inn.readUnsignedShort()
                         val n = inn.readUnsignedShort()
-                        inn.skipBytes(n * 6)
+                        skipFully(inn, n * 6)
                     }
                     2 -> { /* Bell */ }
                     3 -> {
                         inn.readByte(); inn.readByte(); inn.readByte()
                         val n = inn.readInt()
-                        inn.skipBytes(n)
+                        skipFully(inn, n)
                     }
                     else -> {
                         Log.w(TAG, "unknown VNC server message $type")
@@ -265,30 +265,43 @@ class VncClient(
                 0 -> { readRaw(inn, x, y, w, h); dirty = true }
                 1 -> { copyRect(inn, x, y, w, h); dirty = true }
                 -223 -> {
-                    allocFb(w, h)
-                    resized = true
-                    dirty = true
+                    if (w != fbW || h != fbH) {
+                        allocFb(w, h)
+                        resized = true
+                        dirty = true
+                    }
                 }
                 -308 -> {
-                    // ExtendedDesktopSize: 1 byte screen count, 1 pad, 16 bytes per screen
+                    // ExtendedDesktopSize: U8 screen count, U8[3] padding, 16 bytes
+                    // per screen (RFB spec; QEMU ui/vnc.c writes 3 pad bytes).
+                    // Reading only 1 pad byte here (<= 0.2.8) misaligned the
+                    // stream by 2 bytes on every connect: garbage rects, an
+                    // out-of-bounds crash, reconnect, and never a single frame.
                     val nscr = inn.readUnsignedByte()
-                    inn.readByte()
-                    inn.skipBytes(nscr * 16)
-                    if (w != fbW || h != fbH) allocFb(w, h)
-                    resized = true
-                    dirty = true
+                    skipFully(inn, 3)
+                    skipFully(inn, nscr * 16)
+                    // QEMU answers EVERY non-incremental request with an
+                    // ExtendedDesktopSize-only update. Treating that as a
+                    // resize made us send another non-incremental request,
+                    // forever: a flood of size messages and no pixels (black
+                    // screen on the phone). Only a real size change counts.
+                    if (w != fbW || h != fbH) {
+                        allocFb(w, h)
+                        resized = true
+                        dirty = true
+                    }
                 }
                 -224 -> { // LastRect — remainder of this FBU is empty
                     i = nRects
                 }
                 -239 -> {
                     // Rich cursor: pixel data + bitmask
-                    inn.skipBytes(w * h * 4)
-                    inn.skipBytes(((w + 7) / 8) * h)
+                    skipFully(inn, w * h * 4)
+                    skipFully(inn, ((w + 7) / 8) * h)
                 }
                 -240 -> {
-                    inn.skipBytes(6)
-                    inn.skipBytes(((w + 7) / 8) * h * 2)
+                    skipFully(inn, 6)
+                    skipFully(inn, ((w + 7) / 8) * h * 2)
                 }
                 else -> {
                     Log.w(TAG, "unsupported VNC encoding $encoding; requesting a full refresh")
@@ -309,13 +322,28 @@ class VncClient(
         requestUpdate(!resized)
     }
 
+    /** DataInputStream.skipBytes may skip fewer bytes on a socket; this never does. */
+    private fun skipFully(inn: DataInputStream, n: Int) {
+        if (n <= 0) return
+        val buf = ByteArray(minOf(n, 64 * 1024))
+        var left = n
+        while (left > 0) {
+            val k = minOf(left, buf.size)
+            inn.readFully(buf, 0, k)
+            left -= k
+        }
+    }
+
     private fun readRaw(inn: DataInputStream, x: Int, y: Int, w: Int, h: Int) {
         val raw = ByteArray(w * h * 4)
         inn.readFully(raw)
         var i = 0
         for (row in 0 until h) {
+            // Clip to our framebuffer instead of crashing on a stale rect.
+            if (y + row >= fbH || x >= fbW) { i += w * 4; continue }
             var dst = (y + row) * fbW + x
             for (col in 0 until w) {
+                if (x + col >= fbW) { i += 4; dst++; continue }
                 val b = raw[i].toInt() and 0xff
                 val g = raw[i + 1].toInt() and 0xff
                 val r = raw[i + 2].toInt() and 0xff
@@ -329,6 +357,7 @@ class VncClient(
     private fun copyRect(inn: DataInputStream, x: Int, y: Int, w: Int, h: Int) {
         val srcX = inn.readUnsignedShort()
         val srcY = inn.readUnsignedShort()
+        if (srcX + w > fbW || srcY + h > fbH || x + w > fbW || y + h > fbH) return
         val copy = IntArray(w * h)
         for (row in 0 until h) {
             System.arraycopy(pixels, (srcY + row) * fbW + srcX, copy, row * w, w)

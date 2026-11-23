@@ -38,6 +38,10 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var toolbar: LinearLayout
     private lateinit var status: TextView
     private lateinit var bootElapsed: TextView
+    private lateinit var diag: TextView
+    @Volatile private var vncFrames = 0L
+    @Volatile private var vncW = 0
+    @Volatile private var vncH = 0
     private lateinit var serialPanel: android.widget.LinearLayout
     private lateinit var serialScroll: ScrollView
     private lateinit var serialLog: TextView
@@ -116,6 +120,7 @@ class DisplayActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         status.visibility = View.GONE
         bootElapsed = findViewById(R.id.bootElapsed)
+        diag = findViewById(R.id.diag)
         serialPanel = findViewById(R.id.serialPanel)
         serialScroll = findViewById(R.id.serialScroll)
         serialLog = findViewById(R.id.serialLog)
@@ -367,6 +372,11 @@ class DisplayActivity : AppCompatActivity() {
     private fun updateBootElapsed() {
         val elapsed = elapsedLabel()
         bootElapsed.text = elapsed
+        // On-screen diagnostics: is the guest framebuffer black (QMP), or is
+        // our view not drawing it (VNC frames / blank check)?
+        val fb = service?.lastFbDiag ?: "guest fb (QMP) pending"
+        val view = "view: VNC ${vncW}x${vncH} frames=$vncFrames ${if (placeholder) "blank" else "painted"}"
+        diag.text = "$fb\n$view  $elapsed"
     }
 
     private fun actuallyStart() {
@@ -415,6 +425,7 @@ class DisplayActivity : AppCompatActivity() {
             try {
                 val client = VncClient(unixPath = sock.absolutePath, listener = object : VncClient.Listener {
                     override fun onFrame(bitmap: android.graphics.Bitmap, width: Int, height: Int) {
+                        vncFrames++; vncW = width; vncH = height
                         runOnUiThread {
                             screen.onFrame(bitmap, width, height)
                         }

@@ -45,3 +45,9 @@ Device ids (typical): Pixel 6 = `oriole`, Pixel 7 = `panther`, Pixel 8 = `shiba`
 To use Kali instead, set `isoUrl` to the official installer-arm64 ISO and `isoSha256` to its SUMS digest.
 
 Screenshots land in `/sdcard/googletest/test_outputfiles/shot-*.png` and the app's `files/ftl/` dir, which FTL pulls with `--directories-to-pull`.
+
+## v0.2.9 short real-device run (what actually worked)
+
+- Build: `./gradlew :app:assembleRelease :app:assembleReleaseAndroidTest -PtestBuildType=release` (test APK must carry the release signature).
+- Push the ISO with `--other-files /sdcard/nimbus/x.iso=<local iso>` and pass `isoPushed=/sdcard/nimbus/x.iso,isoSha256=...,setupMin=3,bootMin=5`. Do not push into `/sdcard/Android/data/<pkg>` (pushed before install, so the app gets EACCES). On-device downloads of 600 MB took more than 5 minutes.
+- `--device model=oriole,version=33,locale=en,orientation=landscape --timeout 10m --no-record-video`.

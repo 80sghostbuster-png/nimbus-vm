@@ -1,3 +1,32 @@
+# v0.2.9-test (versionCode 12): black main display fixed, proven on a real Pixel 6
+
+Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4.
+
+## Root cause (found on a real Pixel 6 in Firebase Test Lab)
+
+1. **VNC stream misaligned on every connect (this caused the black screen).** QEMU's ExtendedDesktopSize (-308) rect is `U8 screens, U8[3] padding, 16 bytes per screen`. `VncClient` read only **1** padding byte, so after QEMU's first -308 (sent on every non-incremental request) the RFB stream was off by 2 bytes. Every rect after that was garbage, `readRaw` threw `ArrayIndexOutOfBounds` ("Display disconnected: length=307200; index=41942880"), the activity reconnected about every 74 s, and **zero frames were ever drawn**. Real device, before the fix: kernel and d-i running, on-screen diag `view: VNC 0x0 frames=0 blank` (`screenshots/v029-ftl-pixel6-before-vnc-misaligned.png`). Box check with a client that has the same 1-byte bug: stream garbage at once (`enc 65535`). The box tests never caught this because the Python grabber read the padding correctly. This affects every guest (Kali, Debian, Ubuntu, Windows).
+2. **The ExtendedDesktopSize request loop.** Every -308 counted as a "resize", so the client sent a non-incremental request, which got another -308, forever. Fixed: only a real size change counts.
+3. **Healthy boots were restarted.** After `bootconsole [pl11] disabled`, a `console=tty0` kernel is quiet on Serial, so the 60 s stall fallback killed the VM. Now no stall restart once kernel output has been seen.
+4. **The QMP diag always said "unreadable".** The Android QEMU build has no libpng, so `screendump format=png` failed. It now uses PPM and parses it in the app.
+
+## What changed
+
+- `VncClient`: reads 3 padding bytes for -308; exact `skipFully` instead of `skipBytes` (which can short-skip on sockets); raw/copyrect clipped to the framebuffer; resize only on a real size change.
+- `VncView`: the guest fills the whole view edge to edge (no black bars, nothing cropped). The 800x600 guest is stretched to the phone's aspect. Touch mapping already uses separate x/y scales.
+- `VmService`/`QemuEngine`: no stall restart after kernel output; PPM screendump every 10 s; `lastFbDiag` = `guest fb (QMP) WxH nonblack=N/T @Ts`; a PNG copy goes to `qmp-screendump.png`.
+- `DisplayActivity` + layout: small diag line bottom-left (QMP nonblack, VNC size, frames, blank/painted, elapsed).
+- `IsoDownloader.downloadUrl`: `file://` support (test/adb path only; the Add ISO picker is unchanged).
+- `BootProofTest`: short runs (`setupMin`/`bootMin`), `isoPushed` (Test Lab `--other-files` streamed in via a shell `cat`), a screenshot every 20 s plus `qmp-NN.png`. `-PtestBuildType=release` signs the test APK with the release key (real devices require it).
+
+## Real-device proof: Firebase Test Lab, physical Pixel 6 (`oriole`, Tensor G1, Android 13), landscape
+
+Kali 2026.3 **installer-netinst-arm64** ISO (same Kali kernel 7.1.5 and gtk d-i as the full installer ISO; used because the 3.8 GB ISO can't be moved inside a short run). APK SHA-256 `ef08459783e7154dc6d47c2640559588f86ed8f8ec3f641270fb583cde28ea48`.
+- 0:20: Kali kernel text full-screen on the main display: `screenshots/v029-ftl-pixel6-kali-kernel-text-0m20s.png`
+- about 1:00–1:41: Kali installer **Select a language**, edge to edge, toolbar visible: `screenshots/v029-ftl-pixel6-kali-select-language-1m41s.png`, `...-4m43s.png`
+- QMP: `ramfb=800x600 nonblack=475588/480000`; VNC `frames=378 painted`.
+
+Not proven: other ISOs (Debian/Ubuntu) on a real device (the free Test Lab minutes were used up); the full 3.8 GB Kali ISO on a device; Pixel 6 Pro specifically (Pixel 6 is the same Tensor G1).
+
 # v0.2.8-test (versionCode 11) — root cause of the phone freeze: unread serial socket
 
 Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. Not proven on a real arm64 phone yet.

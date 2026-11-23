@@ -147,6 +147,37 @@ class IsoDownloader {
             onProgress(dest.length(), dest.length())
             return
         }
+        if (url.startsWith("file://")) {
+            // Test/adb path: copy an ISO already on the device (e.g. pushed by Test Lab).
+            val src = File(url.removePrefix("file://"))
+            val total = src.length()
+            val part = File(dest.parentFile, dest.name + ".partial")
+            src.inputStream().use { inp ->
+                part.outputStream().use { out ->
+                    val buf = ByteArray(1 shl 20)
+                    var copied = 0L
+                    var lastReport = 0L
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        copied += n
+                        if (copied - lastReport >= (16L shl 20)) {
+                            lastReport = copied
+                            onProgress(copied, total)
+                        }
+                    }
+                }
+            }
+            if (want.isNotEmpty() && sha256(part) != want) {
+                part.delete()
+                error("SHA-256 mismatch for $url")
+            }
+            if (dest.exists()) dest.delete()
+            check(part.renameTo(dest)) { "rename failed" }
+            onProgress(total, total)
+            return
+        }
         val plan = Plan(
             preset = DistroPreset(
                 id = "url",
