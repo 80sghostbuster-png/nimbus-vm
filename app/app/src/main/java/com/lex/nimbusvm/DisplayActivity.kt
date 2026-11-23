@@ -47,8 +47,7 @@ class DisplayActivity : AppCompatActivity() {
     private var bound = false
     private var placeholder = true
     private var guestPainted = false
-    private var userWantsLog = true
-    private var userPinnedLog = false
+    private var userWantsLog = false
     private val ui = Handler(Looper.getMainLooper())
     private var serialFile: File? = null
     private var serialIo: SerialConsole? = null
@@ -160,15 +159,10 @@ class DisplayActivity : AppCompatActivity() {
             true
         }
         btnSerial.setOnClickListener {
-            if (serialOpen() && guestPainted) {
-                userWantsLog = false
-                userPinnedLog = false
-            } else {
-                userWantsLog = true
-                userPinnedLog = guestPainted
+            userWantsLog = !userWantsLog
+            if (userWantsLog) {
                 serialFollow = true
                 btnJumpLatest.visibility = View.GONE
-                refreshSerial()
                 connectSerialIo()
             }
             applyMainView()
@@ -215,21 +209,19 @@ class DisplayActivity : AppCompatActivity() {
      * Never shows a "Display connected" placeholder.
      */
     private fun applyMainView() {
-        val showLog = userWantsLog || !guestPainted
-        serialPanel.visibility = if (showLog) View.VISIBLE else View.GONE
-        screen.visibility = if (showLog) View.INVISIBLE else View.VISIBLE
+        // Main area is ALWAYS the guest display (Kali's own boot console and
+        // installer). Serial is a separate panel the user opens with Serial.
+        screen.visibility = View.VISIBLE
+        serialPanel.visibility = if (userWantsLog) View.VISIBLE else View.GONE
         status.visibility = View.GONE
-        if (showLog) {
+        if (userWantsLog) {
             refreshSerial()
             if (serialFollow) scrollSerialToBottom()
         }
     }
 
     private fun onGuestPainted() {
-        if (guestPainted) return
         guestPainted = true
-        if (!userPinnedLog) userWantsLog = false
-        applyMainView()
     }
 
     private fun appendLogError(msg: String) {
@@ -360,8 +352,7 @@ class DisplayActivity : AppCompatActivity() {
                     }
                 }
                 updateBootElapsed()
-                maybeAutoSwitchFromScreendump(serialOnly)
-            }
+                    }
         }
     }
 
@@ -378,22 +369,11 @@ class DisplayActivity : AppCompatActivity() {
         bootElapsed.text = elapsed
     }
 
-    /** QMP screendump lines look like: ramfb=800x600 nonblack=1234/480000 */
-    private fun maybeAutoSwitchFromScreendump(serialText: String) {
-        if (guestPainted) return
-        val matches = NONBLACK_RE.findAll(serialText)
-        if (matches.any { (it.groupValues[1].toIntOrNull() ?: 0) > 0 }) {
-            onGuestPainted()
-        }
-    }
-
     private fun actuallyStart() {
         val svc = service ?: return
         status.visibility = View.GONE
         placeholder = true
         guestPainted = false
-        userWantsLog = true
-        userPinnedLog = false
         applyMainView()
         if (bootStartedAt == 0L) bootStartedAt = SystemClock.elapsedRealtime()
         bindSerialFile()
@@ -558,7 +538,6 @@ class DisplayActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_VM_ID = "vm_id"
         const val EXTRA_START = "start"
-        private val NONBLACK_RE = Regex("nonblack=([0-9]+)")
     }
 }
 

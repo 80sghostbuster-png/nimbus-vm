@@ -1,3 +1,25 @@
+# v0.2.8-test (versionCode 11) — root cause of the phone freeze: unread serial socket
+
+Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. Not proven on a real arm64 phone yet.
+
+## Root cause (reproduced on the box)
+
+`DisplayActivity` connected `SerialConsole` to QEMU's `serial.sock` (for keyboard input) and never read from it. QEMU 10.2.4 `pl011` writes with the blocking `qemu_chr_fe_write_all()`; once the unix-socket buffer fills it spins forever holding the BQL, so the guest freezes mid-character and QMP stops answering. That matches every phone report: v0.2.2–0.2.4 "UEFI banner then `[=3h`", v0.2.5 "frozen at `OF: reserved mem: Res`". The box runs never attached a socket client, so they always booted.
+
+Box repro (`tests/work/serial-block/`, same QEMU source, Kali 2026.3 installer kernel, AAVMF, ramfb, cortex-a72):
+- non-reading client, unpatched x86 build: serial stops at 278 B mid-line, QMP times out.
+- draining client: boots to the Kali language screen.
+- non-reading client, patched pl011: full kernel boot on the framebuffer, QMP fine.
+- **The APK's own Android/bionic `libqemu-system-aarch64.so` under qemu-user** with a non-reading client: old 0.2.7 lib frozen at 354 B; patched lib 6807 B (through `console [tty0] enabled`).
+
+## What changed
+
+- `SerialConsole` drains the socket on a daemon thread.
+- QEMU patch `native/patches/0004-pl011-nonblocking-tx.patch` (applied in-tree, Android lib rebuilt incrementally, still NEEDED only libm/libdl/libc): best-effort TX, ~10 ms retry then drop until the backend accepts again. Serial can never freeze the guest.
+- Main area is always the guest display: Kali's own kernel console (efifb on ramfb, `console=tty0`) and then the installer. Serial is a separate bottom panel toggled by the Serial button. No "Display connected" text.
+- Guest screen is fit (whole 800×600 visible, full height) instead of center-cropped, so the newest console line is not cut off. Pinch to zoom.
+- Research of Vectras / Termux / UTM / Limbo: `docs/research-other-apps.md`.
+
 # v0.2.7-test (versionCode 10) — live Serial in the main area, no "Display connected"
 
 Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. This is a UI fix on top of the 0.2.6-test engine. It is not a verified fix of the Pixel mid-kernel stall until Lex confirms the language screen on the phone.

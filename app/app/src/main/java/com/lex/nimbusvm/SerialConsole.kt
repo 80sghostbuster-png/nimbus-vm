@@ -5,10 +5,17 @@ import android.net.LocalSocketAddress
 import android.view.KeyEvent
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 /**
  * Interactive connection to QEMU's serial chardev unix socket.
  * Guest output is also copied by QEMU into the logfile the Serial panel tails.
+ *
+ * IMPORTANT: once connected we MUST keep reading the socket. If a client is
+ * connected and never reads, the socket buffer fills and QEMU's PL011
+ * (qemu_chr_fe_write_all) spins with the BQL held: the whole guest freezes
+ * mid-line. That was the Pixel "OF: reserved mem: Res" / "[=3h" hang.
+ * The bytes are discarded here; QEMU's logfile already records them.
  */
 class SerialConsole(private val unixPath: String) {
     private var sock: LocalSocket? = null
@@ -25,6 +32,17 @@ class SerialConsole(private val unixPath: String) {
         sock = ls
         out = ls.outputStream
         open.set(true)
+        val input = ls.inputStream
+        thread(name = "serial-drain", isDaemon = true) {
+            val buf = ByteArray(16384)
+            try {
+                while (open.get() && sock === ls) {
+                    if (input.read(buf) < 0) break
+                }
+            } catch (_: Exception) {
+            }
+            if (sock === ls) open.set(false)
+        }
     }
 
     fun close() {

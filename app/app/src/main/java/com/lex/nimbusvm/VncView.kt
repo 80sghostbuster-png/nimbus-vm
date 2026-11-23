@@ -491,7 +491,9 @@ class VncView @JvmOverloads constructor(
             out.set(0, 0, 0, 0)
             return
         }
-        val scale = maxOf(vw.toFloat() / iw, vh.toFloat() / ih)
+        // Fit the whole guest screen (full height in landscape) so the newest
+        // console line at the bottom is never cropped; pinch to zoom in.
+        val scale = minOf(vw.toFloat() / iw, vh.toFloat() / ih)
         val w = (iw * scale).toInt()
         val h = (ih * scale).toInt()
         val l = (vw - w) / 2

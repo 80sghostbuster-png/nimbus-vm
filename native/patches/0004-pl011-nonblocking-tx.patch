@@ -1,0 +1,45 @@
+--- a/hw/char/pl011.c	2026-11-23 13:09:31.501562039 -0600
++++ b/hw/char/pl011.c	2026-11-23 13:09:31.513561751 -0600
+@@ -224,6 +224,24 @@
+     pl011_fifo_rx_put(s, value);
+ }
+ 
++static bool pl011_tx_stalled;
++
++static void pl011_write_besteffort(PL011State *s, uint8_t data)
++{
++    int tries = pl011_tx_stalled ? 1 : 200;   /* ~10ms when healthy */
++    while (tries-- > 0) {
++        int r = qemu_chr_fe_write(&s->chr, &data, 1);
++        if (r == 1 || (r < 0 && errno != EAGAIN)) {
++            pl011_tx_stalled = false;
++            return;
++        }
++        if (tries > 0) {
++            g_usleep(50);
++        }
++    }
++    pl011_tx_stalled = true;
++}
++
+ static void pl011_write_txdata(PL011State *s, uint8_t data)
+ {
+     if (!(s->cr & CR_UARTEN)) {
+@@ -236,10 +254,14 @@
+     }
+ 
+     /*
+-     * XXX this blocks entire thread. Rewrite to use
+-     * qemu_chr_fe_write and background I/O callbacks
++     * Nimbus VM: never block the vCPU (and the BQL) on a slow or unread
++     * chardev backend.  Upstream uses qemu_chr_fe_write_all(), which spins
++     * forever when a unix-socket client is connected but not reading, and
++     * freezes the guest mid-line (seen on Android as a hang at
++     * "OF: reserved mem: Res").  Retry briefly, then drop output until the
++     * backend accepts data again.
+      */
+-    qemu_chr_fe_write_all(&s->chr, &data, 1);
++    pl011_write_besteffort(s, data);
+     pl011_loopback_tx(s, data);
+     s->int_level |= INT_TX;
+     pl011_update(s);
