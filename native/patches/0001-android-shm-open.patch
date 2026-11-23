@@ -1,0 +1,8 @@
+--- a/util/oslib-posix.c
++++ b/util/oslib-posix.c
+@@ -1,6 +1,9 @@
+ #include "qemu/osdep.h"
++#ifdef __ANDROID__
++#include "android_shm.h"
++#endif
+ #include "qapi/error.h"

@@ -1,0 +1,15 @@
+--- a/fsdev/9p-marshal.h
++++ b/fsdev/9p-marshal.h
+@@ -2,6 +2,15 @@
+ #define QEMU_9P_MARSHAL_H
+ 
+ #include "p9array.h"
++
++#ifdef __ANDROID__
++/* bionic sys/stat.h defines these as st_*tim.tv_nsec macros. */
++#undef st_atime_nsec
++#undef st_mtime_nsec
++#undef st_ctime_nsec
++#endif
++
+ typedef struct V9fsString {

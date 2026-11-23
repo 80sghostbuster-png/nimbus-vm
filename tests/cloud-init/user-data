@@ -1,0 +1,83 @@
+#cloud-config
+hostname: nimbus-arm64
+manage_etc_hosts: true
+ssh_pwauth: true
+users:
+  - name: nimbus
+    gecos: Nimbus Test
+    groups: [sudo]
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: nimbus
+package_update: false
+package_upgrade: false
+write_files:
+  - path: /usr/local/bin/nimbus-probe.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set +e
+      log() {
+        local line="$1"
+        # virt machine UART is ttyAMA0; also write console and the 9p share
+        for dev in /dev/ttyAMA0 /dev/console /dev/ttyS0; do
+          [ -w "$dev" ] && printf '%s\n' "$line" > "$dev"
+        done
+        mkdir -p /mnt/share 2>/dev/null
+        if mountpoint -q /mnt/share || mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share 2>/dev/null; then
+          printf '%s\n' "$line" >> /mnt/share/probe.log
+        fi
+      }
+      log "NIMBUS_PROBE_START"
+      log "NIMBUS_UNAME $(uname -a)"
+      log "NIMBUS_ARCH $(uname -m)"
+      # TPM 2.0
+      if [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; then
+        ver="unknown"
+        [ -r /sys/class/tpm/tpm0/tpm_version_major ] && ver=$(cat /sys/class/tpm/tpm0/tpm_version_major)
+        log "NIMBUS_TPM present version=${ver} devs=$(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')"
+      else
+        log "NIMBUS_TPM missing"
+        dmesg 2>/dev/null | grep -i tpm | head -5 | while read -r l; do log "NIMBUS_TPM_DMESG $l"; done
+      fi
+      # Shared folder (virtio-9p). Cloud kernels may need the modules loaded.
+      mkdir -p /mnt/share
+      modprobe 9pnet 2>/dev/null
+      modprobe 9pnet_virtio 2>/dev/null
+      modprobe 9p 2>/dev/null
+      log "NIMBUS_9P_MODS $(find /lib/modules/$(uname -r) -iname '*9p*' 2>/dev/null | tr '\n' ' ')"
+      if mountpoint -q /mnt/share || mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share; then
+        if [ -f /mnt/share/hello.txt ]; then
+          log "NIMBUS_9P ok content=$(cat /mnt/share/hello.txt)"
+          echo "guest-was-here $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /mnt/share/from-guest.txt
+        else
+          log "NIMBUS_9P mounted-but-missing-hello"
+        fi
+      else
+        log "NIMBUS_9P mount-failed err=$(dmesg | grep -i 9p | tail -3 | tr '\n' ';')"
+      fi
+      # slirp internet: DNS + HTTP
+      if getent hosts deb.debian.org >/tmp/dns.out 2>/tmp/dns.err; then
+        log "NIMBUS_DNS ok $(tr '\n' ' ' < /tmp/dns.out)"
+      else
+        log "NIMBUS_DNS fail $(tr '\n' ' ' < /tmp/dns.err)"
+      fi
+      net_ok=0
+      if command -v python3 >/dev/null; then
+        if python3 -c "import urllib.request; r=urllib.request.urlopen('http://deb.debian.org', timeout=20); print(r.status)" >/tmp/http.out 2>/tmp/http.err; then
+          log "NIMBUS_HTTP ok status=$(cat /tmp/http.out)"
+          net_ok=1
+        else
+          log "NIMBUS_HTTP fail $(tr '\n' ' ' < /tmp/http.err)"
+        fi
+      fi
+      if [ "$net_ok" = 0 ] && command -v wget >/dev/null; then
+        if wget -q -O /dev/null --timeout=20 http://deb.debian.org; then
+          log "NIMBUS_HTTP ok via=wget"
+        fi
+      fi
+      log "NIMBUS_READY"
+      # Keep the VM up so the host can run QMP powerdown/reset/stop/cont/snapshot
+      sleep 3600
+runcmd:
+  - [ /usr/local/bin/nimbus-probe.sh ]

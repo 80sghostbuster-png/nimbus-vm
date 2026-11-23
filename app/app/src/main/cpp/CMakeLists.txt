@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(nimbusvm)
+add_library(nimbusvm SHARED nimbus_qemu_jni.cpp)
+find_library(log-lib log)
+target_link_libraries(nimbusvm ${log-lib})

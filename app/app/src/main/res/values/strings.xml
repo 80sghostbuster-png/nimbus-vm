@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Nimbus VM</string>
+    <string name="boot_firmware">Boot AAVMF (serial)</string>
+    <string name="stop_vm">Stop VM</string>
+    <string name="powerdown">ACPI shutdown</string>
+    <string name="hint">Phase 1 debug harness. This boots real UEFI firmware through QEMU, not a fake desktop.</string>
+</resources>

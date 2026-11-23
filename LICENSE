@@ -1,0 +1,16 @@
+This project is licensed under the GNU General Public License version 2
+(GPL-2.0-only), the same license as QEMU, which it links to and ships.
+
+QEMU is Copyright (c) Fabrice Bellard and the QEMU Project developers.
+See third_party/qemu-10.2.4/LICENSE and COPYING after you unpack the
+source tarball (scripts/fetch-sources.sh).
+
+Bundled UEFI firmware (EDK2/OVMF/AAVMF) is under a BSD-2-Clause-Patent
+style license; see firmware/licenses/.
+
+You must not redistribute Microsoft Windows installation media or product
+keys with this software. Users supply their own appropriately licensed
+Windows on ARM media.
+
+The full GPL-2.0 text is the standard Free Software Foundation license:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.html

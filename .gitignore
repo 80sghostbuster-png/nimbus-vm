@@ -1,0 +1,54 @@
+# Large / generated (kept locally, not in git)
+third_party/qemu-10.2.4/
+third_party/qemu-10.2.4.tar.xz
+third_party/deps/
+third_party/*.tar.*
+native/qemu-host-bld/
+native/qemu-host-prefix/
+native/android-prefix/
+native/android-bld/
+native/android-deps-bld/
+tests/images/
+tests/work/
+tests/share/probe.log
+tests/share/from-guest.txt
+firmware/edk2/*.fd
+evidence/*.log
+evidence/*.json
+app/.gradle/
+app/**/build/
+app/local.properties
+signing/*.jks
+signing/*.keystore
+signing/KEYSTORE-KEEP-SAFE.txt
+keystore.properties
+*.apk
+*.apk.idsig
+*.iml
+.idea/
+.DS_Store
+__pycache__/
+*.pyc
+app/app/src/main/jniLibs/**/*.so
+app/app/src/main/assets/firmware/
+app/keystore.properties
+native/android-deps-src/
+native/android-qemu-bld/
+# APK outputs
+dist-apk/
+# Gradle
+app/.gradle/
+# firmware unpacked
+firmware/edk2/*.fd
+# secrets
+signing/
+**/.pw
+# local test leftovers
+tests/share/probe.log
+tests/share/from-guest.txt
+tests/share/from-alpine.txt
+app/app/.cxx/
+app/**/.cxx/
+scripts/*.bak
+config.log
+config-temp/
