@@ -179,3 +179,39 @@ asset name (when published): `Nimbus-VM.apk`.
   for Android 28, NDK r27d; they only need bionic `libc`/`libm`/`libdl`.
   User-mode `--version` on the x86 box failed because `/system/bin/linker64`
   is not present here. Nothing has been run on a real phone.
+
+## Hotfix 0.1.1-engine (2026-11-22, America/Chicago)
+
+Phone install of 0.1.0-engine started QEMU, then immediately failed:
+
+    libqemu-system-aarch64.so: -device virtio-net-pci,netdev=net0: failed to find romfile "efi-virtio.rom"
+
+Cause: the Android-built QEMU has `CONFIG_QEMU_DATADIR` baked to a box path
+that does not exist on the phone, and pc-bios option ROMs were not bundled.
+`virtio-net-pci` still loads `efi-virtio.rom` under UEFI.
+
+Fix in 0.1.1-engine (`versionCode` 2):
+
+- Bundle QEMU 10.2.4 pc-bios option ROMs and keymaps as gzipped assets under
+  `app/app/src/main/assets/qemu-data/` (`scripts/stage-qemu-data.sh`).
+- On first run (and whenever `DATA_PACK_VERSION` changes) extract them to
+  `filesDir/qemu-data/<version>/` and pass `-L` on every QEMU invocation.
+- Set `TMPDIR`/`TEMP`/`TMP`/`HOME`/`XDG_*` under `cacheDir`/`filesDir` (never `/tmp`).
+- `virtio-net-pci,romfile=` as belt-and-braces; `-L` is the real fix.
+- Debug console live-tails serial and QEMU stderr so a future boot failure is visible.
+
+Isolated box proof (`scripts/sim-android-aavmf-boot.sh`): fresh work dir,
+system `/usr/share/qemu` and baked prefix datadirs hidden with bwrap tmpfs.
+Test A (`-L` only, default virtio-net ROM — the phone crash) and Test B
+(exact app argv with `romfile=`) both reached the AAVMF serial banner
+("UEFI firmware (version 2025.02-8+deb13u1 …)") in 2s. `efi-virtio.rom`
+is 160,768 bytes.
+
+Signed APK: 37,144,030 bytes, SHA-256 `a79aa5c87c7470d4360a56e5693466318d8f64ea670880f8e0de14a0c4661dea`.
+Package `com.lex.nimbusvm`, versionCode 2, versionName 0.1.1-engine, signed v2
+with the same project keystore. `assets/qemu-data/efi-virtio.rom` is present
+in the APK (160,768 bytes; AAPT2 stores the decompressed form of the .gz asset).
+
+- Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.1.1-engine
+- Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
+

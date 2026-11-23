@@ -21,12 +21,16 @@ class DebugActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         serialView = findViewById(R.id.serial)
 
+        engine.unpackAll()
         val qemu = engine.qemuBinary(QemuEngine.Arch.ARM64)
+        val rom = File(engine.qemuDataDir(), "efi-virtio.rom")
         status.text = buildString {
             append("native dir: ${engine.nativeDir()}\n")
             append("qemu aarch64: ${qemu.exists()} ${qemu.absolutePath}\n")
             append("qemu-img: ${engine.qemuImg().exists()}\n")
-            append("This is a real QEMU engine debug screen (no fake desktop).")
+            append("datadir -L: ${engine.qemuDataDir()}\n")
+            append("efi-virtio.rom: ${rom.exists()} ${rom.length()} bytes\n")
+            append("This boots real UEFI firmware through QEMU (no fake desktop).")
         }
 
         findViewById<Button>(R.id.boot).setOnClickListener { bootFirmware() }
@@ -42,7 +46,6 @@ class DebugActivity : AppCompatActivity() {
                 runOnUiThread { status.append("\nstopped") }
             }
         }
-        engine.unpackFirmware()
     }
 
     private fun bootFirmware() {
@@ -57,11 +60,11 @@ class DebugActivity : AppCompatActivity() {
                     tpm = false,
                 )
                 val proc = engine.start(cfg, serialFile!!)
-                runOnUiThread { status.append("\nstarted pid-like alive=${proc.isAlive}") }
-                thread { tailSerial() }
-                val err = proc.inputStream.bufferedReader().readText()
+                runOnUiThread { status.append("\nstarted alive=${proc.isAlive}") }
+                thread { tailOutput() }
                 val code = proc.waitFor()
                 tail = false
+                val err = engine.qemuLogFile().takeIf { it.exists() }?.readText().orEmpty().takeLast(4000)
                 runOnUiThread { status.append("\nqemu exited $code\n$err") }
             } catch (e: Exception) {
                 tail = false
@@ -70,23 +73,36 @@ class DebugActivity : AppCompatActivity() {
         }
     }
 
-    private fun tailSerial() {
-        val f = serialFile ?: return
-        var pos = 0L
+    private fun tailOutput() {
+        val serial = serialFile
+        val log = engine.qemuLogFile()
+        var serialPos = 0L
+        var logPos = 0L
         while (tail) {
-            if (f.exists() && f.length() > pos) {
-                val bytes = f.readBytes()
-                if (bytes.size > pos) {
-                    val chunk = String(bytes, pos.toInt(), bytes.size - pos.toInt(), Charsets.UTF_8)
-                    pos = bytes.size.toLong()
-                    runOnUiThread {
-                        serialView.text = String(bytes, Charsets.UTF_8).takeLast(8000)
+            val serialText = readFrom(serial, serialPos).also { serialPos = it.first }.second
+            val logText = readFrom(log, logPos).also { logPos = it.first }.second
+            if (serialText.isNotEmpty() || logText.isNotEmpty()) {
+                val combined = buildString {
+                    if (logText.isNotBlank()) {
+                        append("-- QEMU --\n")
+                        append(logText.takeLast(2000))
+                        append("\n")
                     }
-                    chunk.toString()
+                    append("-- serial --\n")
+                    append((serial?.takeIf { it.exists() }?.readText() ?: "").takeLast(6000))
                 }
+                runOnUiThread { serialView.text = combined }
             }
-            Thread.sleep(400)
+            Thread.sleep(300)
         }
+    }
+
+    private fun readFrom(file: File?, pos: Long): Pair<Long, String> {
+        if (file == null || !file.exists() || file.length() <= pos) return pos to ""
+        val bytes = file.readBytes()
+        if (bytes.size <= pos) return pos to ""
+        val chunk = String(bytes, pos.toInt(), bytes.size - pos.toInt(), Charsets.UTF_8)
+        return bytes.size.toLong() to chunk
     }
 
     override fun onDestroy() {

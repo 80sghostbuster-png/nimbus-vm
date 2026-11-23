@@ -15,6 +15,8 @@ ASSET_FW="$ROOT/app/app/src/main/assets/firmware"
 mkdir -p "$ASSET_FW"
 cp -a "$ROOT/firmware/edk2-gz/." "$ASSET_FW/"
 
+"$ROOT/scripts/stage-qemu-data.sh"
+
 # Stage any built native qemu libs (optional at first — APK can still build the JNI harness)
 JNILIBS="$ROOT/app/app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$JNILIBS"

@@ -11,8 +11,13 @@ import java.util.zip.GZIPInputStream
 import org.json.JSONObject
 
 /**
- * Phase-1 control layer: start/stop a real QEMU process, talk QMP, unpack firmware.
+ * Control layer: start/stop a real QEMU process, talk QMP, unpack firmware and pc-bios.
  * ARM64 is the default. x86_64 is an explicit compatibility (slow) path.
+ *
+ * QEMU is built with a host-style datadir that does not exist on the phone.
+ * Every invocation therefore passes -L <qemuDataDir> and we extract the
+ * bundled option ROMs (efi-virtio.rom, vgabios, keymaps, …) there.
+ * TEMP/HOME/XDG_* are forced into the app's cache/files dirs — never /tmp.
  */
 class QemuEngine(private val context: Context) {
 
@@ -50,7 +55,21 @@ class QemuEngine(private val context: Context) {
 
     fun firmwareDir(): File = File(context.filesDir, "firmware").apply { mkdirs() }
 
+    /** Versioned QEMU datadir passed as -L. Re-extracted when DATA_PACK_VERSION changes. */
+    fun qemuDataDir(): File = File(context.filesDir, "qemu-data/$DATA_PACK_VERSION").apply { mkdirs() }
+
     fun workDir(): File = File(context.filesDir, "vm").apply { mkdirs() }
+
+    fun tmpDir(): File = File(context.cacheDir, "tmp").apply { mkdirs() }
+
+    fun runtimeDir(): File = File(context.cacheDir, "runtime").apply { mkdirs() }
+
+    fun qemuLogFile(): File = File(workDir(), "qemu-stderr.log")
+
+    fun unpackAll() {
+        unpackFirmware()
+        unpackQemuData()
+    }
 
     fun unpackFirmware() {
         val out = firmwareDir()
@@ -76,8 +95,52 @@ class QemuEngine(private val context: Context) {
         }
     }
 
+    fun unpackQemuData() {
+        val out = qemuDataDir()
+        val stamp = File(out, ".stamp")
+        val rom = File(out, "efi-virtio.rom")
+        if (stamp.exists() && stamp.readText().trim() == DATA_PACK_VERSION && rom.exists() && rom.length() > 0) {
+            return
+        }
+        out.deleteRecursively()
+        out.mkdirs()
+        extractAssetTree("qemu-data", out)
+        stamp.writeText(DATA_PACK_VERSION)
+        Log.i(TAG, "unpacked QEMU datadir into $out (efi-virtio.rom=${rom.length()})")
+    }
+
+    private fun extractAssetTree(assetDir: String, dest: File) {
+        dest.mkdirs()
+        val kids = try {
+            context.assets.list(assetDir)
+        } catch (_: Exception) {
+            null
+        } ?: return
+        for (name in kids) {
+            val assetPath = "$assetDir/$name"
+            val sub = try {
+                context.assets.list(assetPath)
+            } catch (_: Exception) {
+                null
+            }
+            if (sub != null && sub.isNotEmpty()) {
+                extractAssetTree(assetPath, File(dest, name.removeSuffix(".gz")))
+                continue
+            }
+            val destFile = File(dest, name.removeSuffix(".gz"))
+            val copied = if (name.endsWith(".gz")) {
+                tryAsset(destFile, assetPath, gzip = true)
+                    || tryAsset(destFile, assetPath, gzip = false)
+            } else {
+                tryAsset(destFile, assetPath, gzip = false)
+            }
+            if (!copied) Log.w(TAG, "missing qemu-data asset $assetPath")
+        }
+    }
+
     private fun tryAsset(dest: File, asset: String, gzip: Boolean): Boolean {
         return try {
+            dest.parentFile?.mkdirs()
             context.assets.open(asset).use { raw ->
                 FileOutputStream(dest).use { fos ->
                     if (gzip) GZIPInputStream(raw).use { it.copyTo(fos) } else raw.copyTo(fos)
@@ -89,12 +152,32 @@ class QemuEngine(private val context: Context) {
         }
     }
 
+    fun applyQemuEnv(pb: ProcessBuilder) {
+        val env = pb.environment()
+        val tmp = tmpDir()
+        val runtime = runtimeDir()
+        env["HOME"] = workDir().absolutePath
+        env["TMPDIR"] = tmp.absolutePath
+        env["TMP"] = tmp.absolutePath
+        env["TEMP"] = tmp.absolutePath
+        env["XDG_CACHE_HOME"] = File(context.cacheDir, "xdg-cache").apply { mkdirs() }.absolutePath
+        env["XDG_RUNTIME_DIR"] = runtime.absolutePath
+        env["XDG_DATA_HOME"] = File(context.filesDir, "xdg-data").apply { mkdirs() }.absolutePath
+        env["XDG_CONFIG_HOME"] = File(context.filesDir, "xdg-config").apply { mkdirs() }.absolutePath
+        // Prevent a leftover host datadir baked into the binary from being used
+        // if someone happens to have one; -L is still the authoritative path.
+        env.remove("QEMU_DATA_DIR")
+        pb.directory(workDir())
+    }
+
     fun buildArgv(cfg: Config, serialFile: File, qmp: File): List<String> {
         val qemu = qemuBinary(cfg.arch)
         require(qemu.exists()) { "QEMU binary missing: ${qemu.absolutePath}" }
         val fw = firmwareDir()
+        val data = qemuDataDir()
         val args = mutableListOf(
             qemu.absolutePath,
+            "-L", data.absolutePath,
             "-accel", "tcg,thread=multi,tb-size=128",
             "-smp", cfg.cpus.toString(),
             "-m", cfg.memoryMb.toString(),
@@ -102,7 +185,9 @@ class QemuEngine(private val context: Context) {
             "-serial", "file:${serialFile.absolutePath}",
             "-qmp", "unix:${qmp.absolutePath},server,nowait",
             "-netdev", "user,id=net0",
-            "-device", "virtio-net-pci,netdev=net0",
+            // romfile= is belt-and-braces: UEFI already has virtio drivers.
+            // -L still ships efi-virtio.rom so a BIOS boot can use it.
+            "-device", "virtio-net-pci,netdev=net0,romfile=",
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0",
             "-device", "usb-tablet,bus=xhci.0",
@@ -123,7 +208,6 @@ class QemuEngine(private val context: Context) {
                     "-drive", "if=pflash,format=qcow2,file=${ensureQcowVars(vars).absolutePath}",
                 )
                 if (cfg.tpm) {
-                    // swtpm socket is started by the caller; this is the QEMU side
                     val sock = File(workDir(), "swtpm.sock")
                     args += listOf(
                         "-chardev", "socket,id=chrtpm,path=${sock.absolutePath}",
@@ -133,7 +217,6 @@ class QemuEngine(private val context: Context) {
                 }
             }
             Arch.X86_64 -> {
-                // Compatibility mode — TCG x86 on an ARM phone is slow.
                 args += listOf(
                     "-machine", "q35,accel=tcg",
                     "-cpu", "qemu64",
@@ -182,10 +265,13 @@ class QemuEngine(private val context: Context) {
         if (!qcow.exists()) {
             val img = qemuImg()
             if (img.exists()) {
-                ProcessBuilder(
+                val pb = ProcessBuilder(
                     img.absolutePath, "create", "-f", "qcow2", "-F", "raw",
                     "-b", rawVars.absolutePath, qcow.absolutePath,
-                ).inheritIO().start().waitFor()
+                )
+                applyQemuEnv(pb)
+                pb.redirectErrorStream(true)
+                pb.start().waitFor()
             } else {
                 return rawVars
             }
@@ -197,22 +283,29 @@ class QemuEngine(private val context: Context) {
         val img = qemuImg()
         require(img.exists()) { "qemu-img missing at ${img.absolutePath}" }
         file.parentFile?.mkdirs()
-        val proc = ProcessBuilder(
+        val pb = ProcessBuilder(
             img.absolutePath, "create", "-f", "qcow2", file.absolutePath, "${sizeGb}G",
-        ).redirectErrorStream(true).start()
+        )
+        applyQemuEnv(pb)
+        pb.redirectErrorStream(true)
+        val proc = pb.start()
         val out = proc.inputStream.bufferedReader().readText()
         check(proc.waitFor() == 0) { "qemu-img failed: $out" }
     }
 
     fun start(cfg: Config, serialFile: File): Process {
         stop()
-        unpackFirmware()
+        unpackAll()
         qmpFile = File(workDir(), "qmp.sock").also { if (it.exists()) it.delete() }
+        val log = qemuLogFile()
+        log.writeText("")
         val argv = buildArgv(cfg, serialFile, qmpFile!!)
         Log.i(TAG, "argv: ${argv.joinToString(" ")}")
-        val pb = ProcessBuilder(argv).redirectErrorStream(true)
-        pb.environment()["HOME"] = workDir().absolutePath
-        pb.directory(workDir())
+        log.appendText("argv: ${argv.joinToString(" ")}\n")
+        val pb = ProcessBuilder(argv)
+        applyQemuEnv(pb)
+        pb.redirectErrorStream(true)
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         val proc = pb.start()
         process = proc
         return proc
@@ -276,5 +369,7 @@ class QemuEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "NimbusVM"
+        /** Bump this whenever bundled pc-bios assets change so they are re-extracted. */
+        const val DATA_PACK_VERSION = "2"
     }
 }
