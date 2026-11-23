@@ -30,6 +30,8 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var toolbar: LinearLayout
     private lateinit var status: TextView
     private lateinit var bootOverlay: View
+    private lateinit var bootOverlayTitle: TextView
+    private lateinit var bootOverlayBody: TextView
     private lateinit var serialPanel: ScrollView
     private lateinit var serialLog: TextView
     private lateinit var btnTouch: Button
@@ -89,6 +91,8 @@ class DisplayActivity : AppCompatActivity() {
         toolbar = findViewById(R.id.toolbar)
         status = findViewById(R.id.status)
         bootOverlay = findViewById(R.id.bootOverlay)
+        bootOverlayTitle = findViewById(R.id.bootOverlayTitle)
+        bootOverlayBody = findViewById(R.id.bootOverlayBody)
         serialPanel = findViewById(R.id.serialPanel)
         serialLog = findViewById(R.id.serialLog)
         btnTouch = findViewById(R.id.btnTouch)
@@ -188,24 +192,56 @@ class DisplayActivity : AppCompatActivity() {
         serialPanel.layoutParams = lp
     }
 
+    private fun stripAnsi(raw: String): String =
+        raw.replace("\u001B\\[[0-9;?]*[A-Za-z]".toRegex(), "").replace("\r", "")
+
     private fun refreshSerial() {
-        val f = serialFile ?: return
+        val svc = service
         thread {
-            val text = runCatching {
-                if (!f.exists()) return@runCatching ""
-                val raw = f.readText()
-                raw.takeLast(8000)
-                    .replace("\u001B\\[[0-9;?]*[A-Za-z]".toRegex(), "")
-                    .replace("\r", "")
-            }.getOrDefault("")
-            if (text.isEmpty()) return@thread
+            val parts = mutableListOf<String>()
+            val extract = svc?.engine?.workDir(vmId)?.let { File(it, "installer-extract.txt") }
+            if (extract != null && extract.exists()) {
+                parts += "--- installer ---\n" + extract.readText().trim()
+            }
+            val qlog = svc?.engine?.qemuLogFile(vmId)
+            if (qlog != null && qlog.exists()) {
+                parts += "--- qemu ---\n" + qlog.readText().takeLast(4000).trim()
+            }
+            val serial = serialFile
+            if (serial != null && serial.exists()) {
+                parts += "--- serial ---\n" + stripAnsi(serial.readText()).takeLast(8000).trim()
+            }
+            val text = parts.joinToString("\n\n")
+            val serialOnly = if (serial != null && serial.exists()) stripAnsi(serial.readText()) else ""
+            val extractText = extract?.takeIf { it.exists() }?.readText().orEmpty()
             runOnUiThread {
-                if (serialLog.text != text) {
+                if (text.isNotEmpty() && serialLog.text != text) {
                     serialLog.text = text
                     serialPanel.post { serialPanel.fullScroll(View.FOCUS_DOWN) }
                 }
+                updateBootOverlay(extractText, serialOnly)
             }
         }
+    }
+
+    private fun updateBootOverlay(extractLog: String, serialText: String) {
+        val low = (extractLog + "\n" + serialText).lowercase()
+        val extracted = extractLog.startsWith("Extracted ARM64")
+        val extractFailed = extractLog.contains("failed", ignoreCase = true) ||
+            extractLog.startsWith("No /install.a64")
+        val title = when {
+            "select a language" in low || "choose the language" in low -> "Installer is running"
+            "linux version" in low || "efi stub:" in low -> "Booting… (kernel)"
+            extracted -> "Booting… (installer)"
+            else -> "Booting… (firmware)"
+        }
+        val body = when {
+            extractFailed -> extractLog.trim() + " Open Serial for the QEMU command line and firmware log."
+            extracted -> "Installer kernel extracted. The display can stay dark until the guest paints — open Serial for kernel logs and the QEMU command line."
+            else -> "Guest display is not active yet. The machine is still booting — open Serial for the live firmware log and the QEMU command line."
+        }
+        bootOverlayTitle.text = title
+        bootOverlayBody.text = body
     }
 
     private fun actuallyStart() {

@@ -1,3 +1,30 @@
+# v0.2.3 (versionCode 6) — phone ISO-boot hotfix
+
+Box-verified Sunday Nov 22, 2026, America/Chicago. Not yet phone-tested at publish time.
+
+Lex's v0.2.2 phone boot of the official Kali ARM64 installer stayed on a black "Display connected" screen with the overlay "Booting… (firmware)". Serial showed only the AAVMF banner and `[=3h`. That serial text is consistent with *both* a silent firmware/GRUB fallback (ISO extract missed `/install.a64`) *and* a successful `-kernel` boot with `console=tty0` only (the box 0.2.2 proofs also left only the firmware banner on Serial while the installer ran on ramfb). 0.2.3 fixes both interpretations.
+
+## What changed
+
+- **Re-detect every ISO boot.** `QemuEngine.buildArgv` calls `IsoInspector.tryExtractArm64Installer` whenever an ISO is attached. There is no sticky boot-mode flag, so a VM created under 0.2.0/0.2.1 is re-evaluated on the first 0.2.3 start.
+- **ISO extraction no longer depends on Joliet.** ISO 9660 stores `VMLINUZ.;1`, which used to index as `INSTALL.A64/VMLINUZ.` — `findEntry("INSTALL.A64/VMLINUZ")` only hit if Joliet also ran. Trailing dots are now stripped, and a Joliet walk failure keeps the ISO 9660 index. A Java line-for-line port of this logic, ISO9660-only, found Kali and Debian `/install.a64/vmlinuz` plus gtk/text initrds; SHA-256 matched the known-good extracts.
+- **Visible extract errors.** `work/installer-extract.txt` is always written. The Serial panel shows that file, the QEMU command line / stderr (`qemu-stderr.log`), and `serial.log` even when Serial is only the firmware banner. The boot overlay title/body reflects extract success (`Booting… (installer)`), kernel logs (`Booting… (kernel)`), or a failed extract (the error text, then firmware/GRUB fallback — no silent fallback).
+- **Installer cmdline stays `acpi=off console=tty0`.** A trial of `console=ttyAMA0 console=tty0` (tty0 last) did put kernel logs on Serial after the AAVMF banner, but debian-installer then printed `Framebuffer not available; disabling graphical frontend` even though efifb/ramfb was up, and ran the text language selector on the UART. 0.2.3 therefore does not add ttyAMA0. Serial still distinguishes the boot path: `installer-extract.txt` plus the QEMU command line in `qemu-stderr.log` show whether `-kernel` ran.
+- **Installer `-kernel` stays on ramfb.** gtk and text initrds both use `-device ramfb,id=ramfb0` and `-vnc …,display=ramfb0`. A gtk boot on virtio-gpu alone (DRM, no `/dev/fb0`) printed `Framebuffer not available; disabling graphical frontend` and fell back to the text UI. Firmware/GRUB fallback stays virtio-gpu + `display=gpu0`. ARM64 installer `-kernel` still uses `-machine …,acpi=off`.
+
+## Box proof
+
+Official Kali 2026.3 installer ISO, `-kernel` + gtk initrd, ramfb, `display=ramfb0`, `acpi=off`, append `acpi=off console=tty0`, `-accel tcg,thread=single`, `-smp 2`. The app VNC path reached the gtk "Select a language" screen. Proof: `screenshots/kali-023-graphical-install-vnc.png`. APK 39,159,360 bytes, SHA-256 `555cac41d04aa2dd4801e05fef15db987c4f1df5bb11bdaa0fbea26e3a61b502`.
+
+Firmware/GRUB is the fallback when extract fails (now visible in Serial/overlay). That path is not hung on the box: under the same `-accel tcg,thread=single -smp 2`, AAVMF reached the Kali GRUB menu on virtio-gpu (VNC `display=gpu0`) in about a minute (mean ~6.5, which clears the boot overlay). Serial stays at the AAVMF banner until BdsDxe, then shows `GNU GRUB version …` — so a Serial panel that *never* moves past the banner is more consistent with a successful `-kernel` boot (`console=tty0` only) than with a stuck firmware boot. Proof: `screenshots/kali-023-firmware-grub-vnc.png`.
+
+## What Lex should do
+
+Install `Nimbus-VM.apk` over 0.2.2 (same signing key, versionCode 6). Boot the same Kali arm64 ISO (a VM created under 0.2.1/0.2.2 is fine — the ISO is re-detected). Open Serial: you should see `--- installer ---` (`Extracted ARM64 installer kernel… gtk initrd`) and, after the UEFI banner, kernel lines such as `Booting Linux`. If extract failed, Serial and the overlay show the error instead of a silent firmware boot. The display can stay dark until the installer paints; the overlay will say `Booting… (installer)` or `Booting… (kernel)` rather than only `(firmware)`.
+
+0.3.0 work remains paused until this phone bug is confirmed fixed.
+
+
 # Nimbus VM — Phase 1 notes
 
 Living work log. Times are America/Chicago (UTC-6).

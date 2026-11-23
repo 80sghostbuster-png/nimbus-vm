@@ -224,14 +224,17 @@ class QemuEngine(private val context: Context) {
         // ARM64 debian-installer ISOs: boot the gtk (or text) kernel directly
         // so efifb/ramfb stay alive. GRUB's linux loader does not fill
         // screen_info, and ACPI SPCR would otherwise make d-i prefer the UART.
-        val installer = if (cfg.arch == Arch.ARM64 && cfg.iso != null) {
-            try {
-                IsoInspector.extractArm64Installer(cfg.iso, File(work, "installer"))
-            } catch (e: Exception) {
-                Log.w(TAG, "ISO installer extract failed, falling back to firmware/GRUB", e)
-                null
+        val extractFile = File(work, "installer-extract.txt")
+        val extracted = if (cfg.arch == Arch.ARM64 && cfg.iso != null) {
+            IsoInspector.tryExtractArm64Installer(cfg.iso, File(work, "installer")).also {
+                extractFile.writeText(it.log + "\n")
+                Log.i(TAG, it.log)
             }
-        } else null
+        } else {
+            extractFile.writeText("No ARM64 ISO attached; not extracting an installer kernel.\n")
+            null
+        }
+        val installer = extracted?.installer
         args += if (cfg.iso != null) listOf("-boot", "order=cd") else listOf("-boot", "order=c")
         when (cfg.arch) {
             Arch.ARM64 -> {
@@ -241,11 +244,13 @@ class QemuEngine(private val context: Context) {
                     "-cpu", "max",
                 )
                 if (installer != null) {
-                    // ramfb only: the installer kernel's efifb binds this GOP.
-                    // virtio-gpu would reset a second head and steal the VNC
-                    // path, leaving the text installer on serial only.
+                    // -kernel installer (gtk or text): ramfb provides /dev/fb0
+                    // (efifb). virtio-gpu alone has DRM but no fbdev, so the
+                    // gtk initrd prints "Framebuffer not available; disabling
+                    // graphical frontend" and falls back to a text UI.
                     args += listOf("-device", "ramfb,id=ramfb0")
                 } else {
+                    // Firmware/GRUB and disk boots use virtio-gpu.
                     args += listOf("-device", "virtio-gpu-pci,id=gpu0,xres=1280,yres=800")
                 }
                 val code = if (cfg.secureBoot) "AAVMF_CODE.secboot.fd" else "AAVMF_CODE.fd"
@@ -381,6 +386,9 @@ class QemuEngine(private val context: Context) {
         val argv = buildArgv(effective, serialFile, qmpFile!!, vnc)
         Log.i(TAG, "argv: ${argv.joinToString(" ")}")
         log.appendText("argv: ${argv.joinToString(" ")}\n")
+        File(workDir(cfg.vmId), "installer-extract.txt").takeIf { it.exists() }?.let {
+            log.appendText("extract: ${it.readText()}\n")
+        }
         val pb = ProcessBuilder(argv)
         applyQemuEnv(pb, cfg.vmId)
         pb.redirectErrorStream(true)

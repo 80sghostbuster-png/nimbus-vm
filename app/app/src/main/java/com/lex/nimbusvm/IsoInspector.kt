@@ -96,7 +96,31 @@ object IsoInspector {
      * present. Returns null when the ISO has no install.a64 tree (live or
      * unknown layout) so the caller can fall back to firmware/GRUB.
      */
-    fun extractArm64Installer(iso: File, destDir: File): Arm64Installer? {
+    data class InstallerExtract(
+        val installer: Arm64Installer?,
+        val log: String,
+    )
+
+    /** Never throws. Used on every ISO boot so a 0.2.0/0.2.1 VM is re-detected. */
+    fun tryExtractArm64Installer(iso: File, destDir: File): InstallerExtract {
+        return try {
+            val inst = extractArm64Installer(iso, destDir)
+            if (inst == null) {
+                InstallerExtract(null, "No /install.a64 kernel on this ISO; booting firmware/GRUB.")
+            } else {
+                val kind = if (inst.graphical) "graphical (gtk initrd)" else "text (initrd)"
+                InstallerExtract(
+                    inst,
+                    "Extracted ARM64 $kind from ${iso.name}: vmlinuz ${inst.kernel.length()} bytes, " +
+                        "initrd ${inst.initrd.length()} bytes. append=${inst.append}",
+                )
+            }
+        } catch (e: Exception) {
+            InstallerExtract(null, "Installer extract failed (${e.message}); booting firmware/GRUB.")
+        }
+    }
+
+        fun extractArm64Installer(iso: File, destDir: File): Arm64Installer? {
         if (!iso.exists() || iso.length() < 32_768) return null
         return RandomAccessFile(iso, "r").use { raf ->
             val files = linkedMapOf<String, IsoEntry>()
@@ -133,8 +157,10 @@ object IsoInspector {
     }
 
     private fun findEntry(files: Map<String, IsoEntry>, path: String): IsoEntry? {
-        val want = path.trim('/').uppercase(Locale.US)
-        return files[want] ?: files.values.firstOrNull { it.path.equals(want, ignoreCase = true) }
+        val want = path.trim('/').uppercase(Locale.US).trimEnd('.')
+        return files[want]
+            ?: files["$want."]
+            ?: files.values.firstOrNull { it.path.uppercase(Locale.US).trimEnd('.') == want }
     }
 
     private fun indexIso(raf: RandomAccessFile, files: MutableMap<String, IsoEntry>) {
@@ -144,15 +170,19 @@ object IsoInspector {
         if (pvd[0] != 1.toByte()) return
         val root = pvd.copyOfRange(156, 190)
         walkDir(raf, extent(root), size(root), "", linkedSetOf(), 0, visited = mutableSetOf(), files = files)
-        for (s in 17..31) {
-            raf.seek(s * 2048L)
-            if (raf.read(pvd) < 2048) break
-            if (pvd[0] == 255.toByte()) break
-            if (pvd[0] == 2.toByte() && String(pvd, 1, 5, Charsets.US_ASCII) == "CD001") {
-                val jroot = pvd.copyOfRange(156, 190)
-                walkDir(raf, extent(jroot), size(jroot), "", linkedSetOf(), 0, joliet = true, visited = mutableSetOf(), files = files)
-                break
+        try {
+            for (s in 17..31) {
+                raf.seek(s * 2048L)
+                if (raf.read(pvd) < 2048) break
+                if (pvd[0] == 255.toByte()) break
+                if (pvd[0] == 2.toByte() && String(pvd, 1, 5, Charsets.US_ASCII) == "CD001") {
+                    val jroot = pvd.copyOfRange(156, 190)
+                    walkDir(raf, extent(jroot), size(jroot), "", linkedSetOf(), 0, joliet = true, visited = mutableSetOf(), files = files)
+                    break
+                }
             }
+        } catch (_: Exception) {
+            // Keep the ISO 9660 names already collected (including VMLINUZ.).
         }
     }
 
@@ -230,13 +260,17 @@ object IsoInspector {
             val low = p.lowercase(Locale.US)
             when {
                 low == "quiet" || low.startsWith("quiet=") -> {}
-                low.startsWith("console=ttyama") || low.startsWith("console=ttys") ||
-                    low.startsWith("console=hvc") || low.startsWith("earlycon=") -> {}
+                low.startsWith("console=") || low.startsWith("earlycon=") -> {}
                 low == "acpi=off" || low.startsWith("acpi=") -> {}
-                low == "console=tty0" || low.startsWith("console=tty0,") -> {}
                 else -> kept.add(p)
             }
         }
+        // console=tty0 only. Adding console=ttyAMA0 (even with tty0 last)
+        // makes debian-installer print "Framebuffer not available; disabling
+        // graphical frontend" and run the text UI on the UART, leaving ramfb
+        // stuck on kernel messages. The Serial panel instead shows the
+        // extract log and the QEMU command line to distinguish -kernel from
+        // firmware/GRUB.
         val insertAt = kept.indexOf("---").let { if (it < 0) kept.size else it }
         kept.add(insertAt, "acpi=off")
         kept.add(insertAt + 1, "console=tty0")
@@ -302,13 +336,17 @@ object IsoInspector {
             val nameLen = rec[32].toInt() and 0xff
             if (nameLen <= 0 || 33 + nameLen > rec.size) continue
             val flags = rec[25].toInt() and 0xff
-            val rawName = if (joliet) {
-                String(rec, 33, nameLen, Charset.forName("UTF-16BE")).trim()
-            } else {
-                String(rec, 33, nameLen, Charsets.US_ASCII).trim()
+            val rawName = try {
+                if (joliet) {
+                    String(rec, 33, nameLen, Charset.forName("UTF-16BE")).trim()
+                } else {
+                    String(rec, 33, nameLen, Charsets.US_ASCII).trim()
+                }
+            } catch (_: Exception) {
+                continue
             }
             if (nameLen == 1 && (rec[33] == 0.toByte() || rec[33] == 1.toByte())) continue
-            val name = rawName.substringBefore(';').trim().uppercase(Locale.US)
+            val name = rawName.substringBefore(';').trim().uppercase(Locale.US).trimEnd('.')
             if (name.isEmpty() || name == "." || name == "..") continue
             val path = if (prefix.isEmpty()) name else "$prefix/$name"
             out.add(path)
