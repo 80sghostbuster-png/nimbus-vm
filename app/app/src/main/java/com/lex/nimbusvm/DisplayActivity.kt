@@ -38,6 +38,7 @@ class DisplayActivity : AppCompatActivity() {
     private var placeholder = true
     private val ui = Handler(Looper.getMainLooper())
     private var serialFile: File? = null
+    private var serialIo: SerialConsole? = null
     private val refreshRunnable = object : Runnable {
         override fun run() {
             val c = vnc
@@ -52,6 +53,7 @@ class DisplayActivity : AppCompatActivity() {
         override fun run() {
             if (serialPanel.visibility == View.VISIBLE || bootOverlay.visibility == View.VISIBLE) {
                 refreshSerial()
+                if (serialOpen() && serialIo?.isConnected != true) connectSerialIo()
             }
             ui.postDelayed(this, 500)
         }
@@ -94,7 +96,7 @@ class DisplayActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnKeyboard).setOnClickListener {
             osk.visibility = if (osk.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            if (osk.visibility == View.VISIBLE) serialPanel.visibility = View.GONE
+            layoutSerialAndOsk()
         }
         findViewById<Button>(R.id.btnPower).setOnClickListener { powerMenu() }
         findViewById<Button>(R.id.btnHide).setOnClickListener {
@@ -120,9 +122,11 @@ class DisplayActivity : AppCompatActivity() {
             val show = serialPanel.visibility != View.VISIBLE
             serialPanel.visibility = if (show) View.VISIBLE else View.GONE
             if (show) {
-                osk.visibility = View.GONE
                 refreshSerial()
+                connectSerialIo()
             }
+            routeOskKeys()
+            layoutSerialAndOsk()
         }
         screen.onRevealToolbar = {
             toolbar.visibility = View.VISIBLE
@@ -155,6 +159,33 @@ class DisplayActivity : AppCompatActivity() {
         val svc = service ?: return
         serialFile = svc.store.get(vmId)?.serialFile(this)
             ?: File(svc.engine.workDir(vmId), "serial.log")
+    }
+
+    private fun serialOpen(): Boolean = serialPanel.visibility == View.VISIBLE
+
+    private fun connectSerialIo() {
+        val svc = service ?: return
+        val sock = svc.engine.serialSock(vmId)
+        if (!sock.exists()) return
+        thread {
+            try {
+                val io = SerialConsole(sock.absolutePath)
+                io.connect()
+                serialIo = io
+            } catch (_: Exception) { /* retried from the serial poller */ }
+        }
+    }
+
+    private fun routeOskKeys() {
+        osk.onKey = if (serialOpen()) {
+            { ks, down -> serialIo?.sendKeysym(ks, down) }
+        } else null
+    }
+
+    private fun layoutSerialAndOsk() {
+        val lp = serialPanel.layoutParams as android.widget.FrameLayout.LayoutParams
+        lp.bottomMargin = if (osk.visibility == View.VISIBLE && serialOpen()) osk.layoutParams.height else 0
+        serialPanel.layoutParams = lp
     }
 
     private fun refreshSerial() {
@@ -250,6 +281,8 @@ class DisplayActivity : AppCompatActivity() {
                     status.text = "Display connected"
                     ui.removeCallbacks(refreshRunnable)
                     ui.post(refreshRunnable)
+                    connectSerialIo()
+                    routeOskKeys()
                 }
             } catch (e: Exception) {
                 runOnUiThread { status.text = "VNC: ${e.message}" }
@@ -282,6 +315,12 @@ class DisplayActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (serialOpen() && event.deviceId >= 0) {
+            val io = serialIo
+            if (io != null && io.isConnected) {
+                return io.sendKeyEvent(event) || super.dispatchKeyEvent(event)
+            }
+        }
         val c = vnc
         if (c != null && event.deviceId >= 0) {
             val ks = KeysymMapper.fromKeyEvent(event) ?: return super.dispatchKeyEvent(event)
@@ -296,6 +335,7 @@ class DisplayActivity : AppCompatActivity() {
         ui.removeCallbacks(refreshRunnable)
         ui.removeCallbacks(serialRunnable)
         vnc?.close()
+        serialIo?.close()
         if (bound) unbindService(conn)
         super.onDestroy()
     }

@@ -80,6 +80,9 @@ class QemuEngine(private val context: Context) {
     fun vncSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
         File(workDir(vmId), "vnc.sock")
 
+    fun serialSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
+        File(workDir(vmId), "serial.sock")
+
     fun qmpSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
         File(workDir(vmId), "qmp.sock")
 
@@ -199,7 +202,8 @@ class QemuEngine(private val context: Context) {
             "-smp", cfg.cpus.toString(),
             "-m", cfg.memoryMb.toString(),
             "-display", "none",
-            "-serial", "file:${serialFile.absolutePath}",
+            "-chardev", "socket,id=serial0,path=${File(work, "serial.sock").absolutePath},server=on,wait=off,logfile=${serialFile.absolutePath},logappend=on",
+            "-serial", "chardev:serial0",
             "-qmp", "unix:${qmp.absolutePath},server,nowait",
             "-netdev", "user,id=net0",
             // romfile= is belt-and-braces: UEFI already has virtio drivers.
@@ -217,14 +221,33 @@ class QemuEngine(private val context: Context) {
             if (sock.exists()) sock.delete()
             sock
         } else null
+        // ARM64 debian-installer ISOs: boot the gtk (or text) kernel directly
+        // so efifb/ramfb stay alive. GRUB's linux loader does not fill
+        // screen_info, and ACPI SPCR would otherwise make d-i prefer the UART.
+        val installer = if (cfg.arch == Arch.ARM64 && cfg.iso != null) {
+            try {
+                IsoInspector.extractArm64Installer(cfg.iso, File(work, "installer"))
+            } catch (e: Exception) {
+                Log.w(TAG, "ISO installer extract failed, falling back to firmware/GRUB", e)
+                null
+            }
+        } else null
         args += if (cfg.iso != null) listOf("-boot", "order=cd") else listOf("-boot", "order=c")
         when (cfg.arch) {
             Arch.ARM64 -> {
+                val acpi = if (installer != null) "off" else "on"
                 args += listOf(
-                    "-machine", "virt,gic-version=3,virtualization=off,acpi=on",
+                    "-machine", "virt,gic-version=3,virtualization=off,acpi=$acpi",
                     "-cpu", "max",
-                    "-device", "virtio-gpu-pci,id=gpu0,xres=1280,yres=800",
                 )
+                if (installer != null) {
+                    // ramfb only: the installer kernel's efifb binds this GOP.
+                    // virtio-gpu would reset a second head and steal the VNC
+                    // path, leaving the text installer on serial only.
+                    args += listOf("-device", "ramfb,id=ramfb0")
+                } else {
+                    args += listOf("-device", "virtio-gpu-pci,id=gpu0,xres=1280,yres=800")
+                }
                 val code = if (cfg.secureBoot) "AAVMF_CODE.secboot.fd" else "AAVMF_CODE.fd"
                 val varsTemplate = if (cfg.secureBoot) "AAVMF_VARS.ms.fd" else "AAVMF_VARS.fd"
                 val vars = File(work, "vars-arm64.fd")
@@ -282,9 +305,23 @@ class QemuEngine(private val context: Context) {
                 "-device", "virtio-9p-pci,fsdev=fsdev0,mount_tag=share",
             )
         }
-        // VNC last so display=gpu0 refers to the GPU we just added.
+        // VNC last so the display= device is already on the argv.
+        // ARM64 installer -kernel boots bind VNC to ramfb0 (efifb). Disk
+        // and generic ISO (firmware/GRUB) boots use virtio-gpu (gpu0).
         vncSock?.let {
-            args += listOf("-vnc", "unix:${it.absolutePath},display=gpu0")
+            val head = when {
+                cfg.arch != Arch.ARM64 -> "gpu0"
+                installer != null -> "ramfb0"
+                else -> "gpu0"
+            }
+            args += listOf("-vnc", "unix:${it.absolutePath},display=$head")
+        }
+        if (installer != null) {
+            args += listOf(
+                "-kernel", installer.kernel.absolutePath,
+                "-initrd", installer.initrd.absolutePath,
+                "-append", installer.append,
+            )
         }
         args += cfg.extraArgs
         return args
@@ -331,6 +368,7 @@ class QemuEngine(private val context: Context) {
         currentWorkDir = workDir(cfg.vmId)
         qmpFile = File(currentWorkDir, "qmp.sock").also { if (it.exists()) it.delete() }
         val vnc = File(currentWorkDir, "vnc.sock").also { if (it.exists()) it.delete() }
+        File(currentWorkDir, "serial.sock").let { if (it.exists()) it.delete() }
         val log = qemuLogFile(cfg.vmId)
         log.writeText("")
         stopSwtpm()

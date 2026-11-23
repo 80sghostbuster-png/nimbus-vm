@@ -17,6 +17,8 @@ class OnScreenKeyboard @JvmOverloads constructor(
 ) : LinearLayout(context, attrs) {
 
     var client: VncClient? = null
+    /** If set, called instead of sending keysyms to the VNC client. */
+    var onKey: ((keysym: Int, down: Boolean) -> Unit)? = null
     var shift = false
         private set
     var ctrl = false
@@ -77,7 +79,7 @@ class OnScreenKeyboard @JvmOverloads constructor(
                         "Alt" -> toggle(b, KeysymMapper.ALT) { alt = it }
                         else -> {
                             val ks = if (shift && label.length == 1) shifted(label) else keysym
-                            client?.sendKey(ks, true)
+                            (onKey ?: { k, d -> client?.sendKey(k, d) })(ks, true)
                         }
                     }
                     true
@@ -85,7 +87,7 @@ class OnScreenKeyboard @JvmOverloads constructor(
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (label !in listOf("Shift", "Ctrl", "Alt")) {
                         val ks = if (shift && label.length == 1) shifted(label) else keysym
-                        client?.sendKey(ks, false)
+                        (onKey ?: { k, d -> client?.sendKey(k, d) })(ks, false)
                     }
                     true
                 }
@@ -103,7 +105,7 @@ class OnScreenKeyboard @JvmOverloads constructor(
         set(next)
         b.setBackgroundColor(if (next) 0xFFC7A452.toInt() else 0xFF2A2D36.toInt())
         b.setTextColor(if (next) 0xFF0E1014.toInt() else Color.WHITE)
-        client?.sendKey(keysym, next)
+        (onKey ?: { k, d -> client?.sendKey(k, d) })(keysym, next)
     }
 
     private fun weightFor(label: String): Float = when (label) {

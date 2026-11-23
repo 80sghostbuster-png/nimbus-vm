@@ -314,3 +314,63 @@ with the same project keystore.
 
 - Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.2.1
 - Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
+
+## Hotfix 0.2.2 (2026-11-22, America/Chicago)
+
+Phone follow-up on 0.2.1: Kali ARM64 GRUB was visible, then the GPU stayed
+black while the text installer ran on serial.
+
+Root cause (box, official `kali-linux-2026.3-installer-arm64.iso`, SHA-256
+`c4a7f9bf3a0ff07c8263fe9e9b0edba0cc3d9b408f1d8f06c066df0afce23072`):
+
+- Kali's default GRUB entry is text **Install** (`/install.a64/initrd.gz`).
+  **Graphical install** uses the same vmlinuz and the gtk initrd. Neither
+  entry passes `console=ttyAMA0`; both use `console=tty0`.
+- The installer kernel *does* have efifb, simplefb, fbcon, and virtio-gpu
+  (module in both initrds). QEMU `ramfb` is a firmware GOP that efifb can
+  bind (`fb0: EFI VGA`, 800x600) when the kernel is started as an EFI
+  stub (`-kernel`).
+- Booting through GRUB leaves no usable framebuffer for the text
+  installer. ACPI SPCR also marks the pl011 UART as the preferred
+  console, so debian-installer starts on serial even when `console=tty0`
+  is on the cmdline. Adding ramfb next to virtio-gpu and pointing VNC
+  at either head is not enough if you stay on the ISO's GRUB path.
+- A kernel cmdline cannot be injected from outside once GRUB owns the
+  boot (no `-append` with a CD EFI boot).
+
+Fix in 0.2.2 (`versionCode` 5):
+
+- For ARM64 ISOs that contain `/install.a64/vmlinuz`, extract the kernel
+  and prefer the gtk initrd, still attach the ISO as a virtio CD, and
+  boot with `-kernel` / `-initrd` / `-append`. Append keeps the ISO's
+  preseed args, forces `acpi=off console=tty0` (no UART console, no
+  `quiet`), and uses `-machine virt,…,acpi=off` plus `-device ramfb,id=ramfb0`
+  only (no virtio-gpu on this path) with `-vnc unix:…,display=ramfb0`.
+- Disk-only and generic ISO boots stay on AAVMF + GRUB, `acpi=on`,
+  `virtio-gpu-pci,id=gpu0`, VNC `display=gpu0`.
+- Serial is interactive: `-chardev socket,…,logfile=serial.log` +
+  `-serial chardev:serial0`. The Serial panel sends OSK and hardware
+  keyboard input to `serial.sock` as a fallback if a guest stays on
+  the UART.
+
+Box-proven on the exact app VNC path (unix socket, RFB raw + CopyRect +
+DesktopSize, `display=ramfb0`):
+
+- Default text Install (`/install.a64/initrd.gz`): newt "Select a language".
+  Proof: `screenshots/kali-022-default-install-vnc.png`.
+- Graphical install (`/install.a64/gtk/initrd.gz`): GTK "KALI / Select a
+  language". Proof: `screenshots/kali-022-graphical-install-vnc.png`.
+- Serial stays the firmware banner only; the installer is on the display.
+
+Not yet tested on a real phone. Install over 0.2.1 with the same keystore.
+The 0.3.0 work (Android swtpm, distro presets, 9p proof, x86 smoke,
+gamepad, migrate) is still unfinished and is not in this hotfix.
+
+Signed APK: 39,155,100 bytes, SHA-256
+`17ab6297e3eb42070f36727767b6c18a1c5021107b6741d174baf5aed98bcf48`.
+Package `com.lex.nimbusvm`, versionCode 5, versionName 0.2.2, signed v2
+with the same project keystore.
+
+- Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.2.2
+- Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
+
