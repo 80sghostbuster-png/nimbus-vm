@@ -38,6 +38,7 @@ class LibraryActivity : AppCompatActivity() {
         store = VmStore(this)
         engine = QemuEngine(this)
         engine.unpackAll()
+        thread { runCatching { engine.selfTest() } }
         empty = findViewById(R.id.empty)
         list = findViewById(R.id.vmList)
         progress = findViewById(R.id.progress)
@@ -55,6 +56,78 @@ class LibraryActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.debugLink).setOnClickListener {
             startActivity(Intent(this, DebugActivity::class.java))
+        }
+        if (savedInstanceState == null) maybeHandleIsoUrl(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        maybeHandleIsoUrl(intent)
+    }
+
+    /**
+     * Test / adb path: download an ISO from a URL and create+boot a VM.
+     * Does not change the Add ISO picker flow.
+     */
+    private fun maybeHandleIsoUrl(intent: Intent?) {
+        val url = intent?.getStringExtra(EXTRA_ISO_URL)?.trim().orEmpty()
+        if (url.isEmpty() || intent == null) return
+        // Consume so a recreate does not start a second download if onNewIntent also fires.
+        intent.removeExtra(EXTRA_ISO_URL)
+        val sha = intent.getStringExtra(EXTRA_ISO_SHA256)?.trim().orEmpty()
+        val bootAfter = intent.getBooleanExtra(EXTRA_AUTO_START, true)
+        setBusy(true, "Downloading ISO…")
+        thread {
+            try {
+                val id = store.newId()
+                val dir = File(filesDir, "vms/$id").apply { mkdirs() }
+                val iso = File(dir, "cdrom.iso")
+                IsoDownloader().downloadUrl(url, iso, sha.ifBlank { null }) { copied, total ->
+                    val label = if (total > 0) {
+                        "Downloading ISO… ${(copied * 100 / total).toInt()}%"
+                    } else {
+                        "Downloading ISO… ${copied / (1024 * 1024)} MB"
+                    }
+                    runOnUiThread { setBusy(true, label) }
+                }
+                runOnUiThread { setBusy(true, "Detecting image…") }
+                val profile = IsoInspector.inspect(iso)
+                val windows = profile.os == IsoInspector.OsKind.WINDOWS
+                val displayName = iso.name
+                val rec = VmRecord(
+                    id = id,
+                    name = VmDefaults.displayName(profile, displayName),
+                    arch = profile.arch,
+                    os = profile.os,
+                    memoryMb = VmDefaults.ramMb(this, windows),
+                    cpus = VmDefaults.cpus(),
+                    diskGb = VmDefaults.diskGb(windows),
+                    isoName = displayName,
+                    isoAttached = true,
+                    tpm = VmDefaults.tpm(windows),
+                    secureBoot = VmDefaults.secureBoot(windows),
+                    sharedEnabled = true,
+                    createdAt = System.currentTimeMillis(),
+                    lastUsedAt = System.currentTimeMillis(),
+                )
+                rec.shareDir(this)
+                store.add(rec)
+                runOnUiThread {
+                    setBusy(false, "")
+                    Toast.makeText(this, profile.summary, Toast.LENGTH_LONG).show()
+                    if (bootAfter) boot(rec) else refresh()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    setBusy(false, "")
+                    AlertDialog.Builder(this)
+                        .setTitle("Could not download that ISO")
+                        .setMessage(e.message ?: e.toString())
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
         }
     }
 
@@ -235,5 +308,10 @@ class LibraryActivity : AppCompatActivity() {
             .show()
     }
 
-    companion object { const val EXTRA_VM_ID = "vm_id" }
+    companion object {
+        const val EXTRA_VM_ID = "vm_id"
+        const val EXTRA_ISO_URL = "iso_url"
+        const val EXTRA_ISO_SHA256 = "iso_sha256"
+        const val EXTRA_AUTO_START = "auto_start"
+    }
 }

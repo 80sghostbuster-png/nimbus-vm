@@ -5,6 +5,8 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.SeekBar
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -71,6 +73,22 @@ class AdvancedActivity : AppCompatActivity() {
         share.isChecked = vm.sharedEnabled
         iso.isChecked = vm.isoAttached
         iso.isEnabled = vm.isoFile(this).exists()
+
+        val recovery = findViewById<Spinner>(R.id.bootRecovery)
+        val modes = BootSettings.modeEntries
+        recovery.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            modes.map { it.second },
+        )
+        val currentMode = BootSettings.mode(this)
+        recovery.setSelection(modes.indexOfFirst { it.first == currentMode }.coerceAtLeast(0))
+        recovery.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                BootSettings.setMode(this@AdvancedActivity, modes[position].first)
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        })
 
         findViewById<Button>(R.id.start).setOnClickListener {
             vm.name = name.text.toString().ifBlank { vm.name }

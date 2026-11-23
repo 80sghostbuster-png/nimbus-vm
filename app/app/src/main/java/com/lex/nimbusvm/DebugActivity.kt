@@ -30,7 +30,8 @@ class DebugActivity : AppCompatActivity() {
             append("qemu-img: ${engine.qemuImg().exists()}\n")
             append("datadir -L: ${engine.qemuDataDir()}\n")
             append("efi-virtio.rom: ${rom.exists()} ${rom.length()} bytes\n")
-            append("This boots real UEFI firmware through QEMU (no fake desktop).")
+            append("This boots real UEFI firmware through QEMU (no fake desktop).\n")
+            append("Installer recovery: ${BootSettings.mode(this@DebugActivity)} (change it in Advanced)")
         }
 
         findViewById<Button>(R.id.boot).setOnClickListener { bootFirmware() }

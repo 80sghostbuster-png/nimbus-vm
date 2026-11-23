@@ -122,6 +122,28 @@
             android:text="Secure Boot firmware"
             android:textColor="#F4F1EA" />
 
+        <TextView
+            android:id="@+id/bootRecoveryLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Installer recovery (experimental)"
+            android:textColor="#C8C4BB" />
+
+        <Spinner
+            android:id="@+id/bootRecovery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="If Serial never shows “Booting Linux” after the UEFI banner, auto-fallback restarts with cortex-a72 + thread=single, then raw pflash VARS."
+            android:textColor="#8A8680"
+            android:textSize="12sp" />
+
         <Button
             android:id="@+id/start"
             android:layout_width="match_parent"

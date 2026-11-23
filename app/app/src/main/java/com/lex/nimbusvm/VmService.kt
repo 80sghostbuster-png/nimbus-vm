@@ -11,8 +11,10 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.io.RandomAccessFile
 
 /** Owns the running QEMU process so it survives DisplayActivity recreation. */
 class VmService : Service() {
@@ -24,7 +26,11 @@ class VmService : Service() {
         private set
     var currentId: String? = null
         private set
+    var currentProfile: BootProfile = BootSettings.defaultProfile
+        private set
     private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var monitorGen = 0
+    private var monitorThread: Thread? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -47,28 +53,44 @@ class VmService : Service() {
         return START_STICKY
     }
 
-    fun startVm(id: String): Result<Unit> {
+    fun startVm(
+        id: String,
+        clearSerial: Boolean = true,
+        profile: BootProfile = BootSettings.initialProfile(this),
+    ): Result<Unit> {
         val vm = store.get(id) ?: return Result.failure(IllegalArgumentException("Unknown VM $id"))
         return try {
-            val cfg = store.toConfig(vm)
+            var cfg = store.toConfig(vm)
+            if (vm.arch == QemuEngine.Arch.ARM64) {
+                cfg = cfg.copy(
+                    cpuModel = profile.cpuModel,
+                    tcgThread = profile.tcgThread,
+                    rawVars = profile.rawVars,
+                )
+            }
             if (cfg.disk != null && !cfg.disk.exists()) engine.createDisk(cfg.disk, vm.diskGb, vm.id)
             val serial = vm.serialFile(this)
-            serial.writeText("")
+            if (clearSerial) serial.writeText("")
+            engine.appendNote(serial, "[nimbus] starting profile ${profile.describe()}")
             startForeground(NOTIF_ID, notification(vm.name, "Starting…"))
             acquireWakeLock()
             engine.start(cfg, serial)
             currentId = id
+            currentProfile = profile
             vm.lastUsedAt = System.currentTimeMillis()
             store.update(vm)
-            startForeground(NOTIF_ID, notification(vm.name, "Running"))
+            startForeground(NOTIF_ID, notification(vm.name, "Running (${profile.id})"))
+            startMonitor(id, serial, profile)
             Result.success(Unit)
         } catch (e: Exception) {
+            stopMonitor()
             stopForeground(STOP_FOREGROUND_REMOVE)
             Result.failure(e)
         }
     }
 
     fun stopVm() {
+        stopMonitor()
         engine.stop()
         currentId = null
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -78,8 +100,123 @@ class VmService : Service() {
 
     fun isThisVmRunning(id: String): Boolean = currentId == id && engine.isRunning
 
+    private fun startMonitor(id: String, serial: File, profile: BootProfile) {
+        stopMonitor()
+        val gen = monitorGen
+        val startedAt = System.currentTimeMillis()
+        val auto = BootSettings.mode(this) == BootSettings.MODE_AUTO
+        val stderr = engine.qemuLogFile(id)
+        monitorThread = Thread({
+            var bannerAt = 0L
+            var kernelAt = 0L
+            var stderrPos = if (stderr.exists()) stderr.length() else 0L
+            var ticks = 0
+            while (gen == monitorGen && engine.isRunning) {
+                try {
+                    Thread.sleep(5_000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (gen != monitorGen || !engine.isRunning) break
+                ticks++
+                val elapsedSec = (System.currentTimeMillis() - startedAt) / 1000
+                val snap = try {
+                    engine.diagnosticSnapshot()
+                } catch (e: Exception) {
+                    "qmp-error: ${e.message}"
+                }
+                engine.appendNote(serial, "[nimbus qmp ${elapsedSec}s profile=${profile.id}] $snap")
+                stderrPos = appendNewStderr(stderr, serial, stderrPos)
+                val text = tailText(serial, 256 * 1024)
+                if (bannerAt == 0L && BootSettings.hasBanner(text)) {
+                    bannerAt = System.currentTimeMillis()
+                    engine.appendNote(serial, "[nimbus] UEFI banner seen at ${elapsedSec}s")
+                }
+                if (kernelAt == 0L && BootSettings.hasKernel(text)) {
+                    kernelAt = System.currentTimeMillis()
+                    engine.appendNote(serial, "[nimbus] kernel output seen at ${elapsedSec}s — fallback cancelled")
+                }
+                if (kernelAt > 0L) continue
+                if (!auto) continue
+                val now = System.currentTimeMillis()
+                val stalled = if (bannerAt > 0L) {
+                    now - bannerAt >= BootSettings.KERNEL_TIMEOUT_MS
+                } else {
+                    now - startedAt >= BootSettings.BANNER_TIMEOUT_MS
+                }
+                if (!stalled) continue
+                val next = BootSettings.nextAutoProfile(profile)
+                if (next == null) {
+                    engine.appendNote(
+                        serial,
+                        "[nimbus] auto-fallback exhausted after ${profile.id}; leaving this session running",
+                    )
+                    break
+                }
+                engine.appendNote(
+                    serial,
+                    "[nimbus] auto-fallback: no kernel after ${elapsedSec}s on ${profile.id}; restarting with ${next.describe()}",
+                )
+                // Restart on this same service; startVm stops the current monitor via stopMonitor+gen.
+                try {
+                    engine.stop()
+                    startVm(id, clearSerial = false, profile = next)
+                } catch (e: Exception) {
+                    engine.appendNote(serial, "[nimbus] auto-fallback restart failed: ${e.message}")
+                }
+                return@Thread
+            }
+            Log.i(TAG, "monitor exit gen=$gen ticks=$ticks running=${engine.isRunning}")
+        }, "nimbus-boot-monitor").also { it.isDaemon = true; it.start() }
+    }
+
+    private fun stopMonitor() {
+        monitorGen++
+        monitorThread?.interrupt()
+        monitorThread = null
+    }
+
+    private fun appendNewStderr(stderr: File, serial: File, already: Long): Long {
+        if (!stderr.exists()) return already
+        val len = stderr.length()
+        if (len <= already) return len
+        return try {
+            val chunk = RandomAccessFile(stderr, "r").use { raf ->
+                raf.seek(already)
+                val n = (len - already).coerceAtMost(16 * 1024).toInt()
+                val buf = ByteArray(n)
+                raf.readFully(buf)
+                String(buf, Charsets.UTF_8)
+            }
+            val trimmed = chunk.trim()
+            if (trimmed.isNotEmpty()) {
+                engine.appendNote(serial, "[nimbus qemu-stderr]\n$trimmed")
+            }
+            already + (len - already).coerceAtMost(16 * 1024)
+        } catch (_: Exception) {
+            len
+        }
+    }
+
+    private fun tailText(file: File, max: Int): String {
+        if (!file.exists()) return ""
+        val len = file.length()
+        return try {
+            RandomAccessFile(file, "r").use { raf ->
+                val start = (len - max).coerceAtLeast(0)
+                raf.seek(start)
+                val buf = ByteArray((len - start).toInt())
+                raf.readFully(buf)
+                String(buf, Charsets.UTF_8)
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (wakeLock?.isHeld == true) return
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "nimbusvm:vm").also {
             it.setReferenceCounted(false)
             it.acquire()
@@ -111,6 +248,7 @@ class VmService : Service() {
     }
 
     override fun onDestroy() {
+        stopMonitor()
         engine.stop()
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
@@ -122,6 +260,7 @@ class VmService : Service() {
         const val EXTRA_VM_ID = "vm_id"
         private const val CHANNEL = "nimbus-vm"
         private const val NOTIF_ID = 42
+        private const val TAG = "NimbusVM"
 
         fun start(context: Context, vmId: String) {
             val i = Intent(context, VmService::class.java)

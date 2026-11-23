@@ -18,7 +18,8 @@ import kotlin.math.hypot
 import kotlin.math.sqrt
 
 /**
- * Letterboxed guest framebuffer with first-class touch.
+ * Guest framebuffer scaled to fill the view (aspect preserved, center-cropped)
+ * with first-class touch.
  *
  * Direct (default): tap = left click at the finger (usb-tablet via VNC),
  * long-press = right click, two-finger drag = scroll, pinch = zoom the viewer.
@@ -444,7 +445,7 @@ class VncView @JvmOverloads constructor(
     }
 
     private fun layoutDest() {
-        letterbox(width, height, fbW, fbH, letterbox)
+        cover(width, height, fbW, fbH, letterbox)
         val cx = letterbox.exactCenterX()
         val cy = letterbox.exactCenterY()
         val l = cx + (letterbox.left - cx) * userScale + panX
@@ -484,12 +485,13 @@ class VncView @JvmOverloads constructor(
         )
     }
 
-    private fun letterbox(vw: Int, vh: Int, iw: Int, ih: Int, out: Rect) {
+    /** Scale the guest so it covers the view; crop overflow (no letterbox bars). */
+    private fun cover(vw: Int, vh: Int, iw: Int, ih: Int, out: Rect) {
         if (vw <= 0 || vh <= 0 || iw <= 0 || ih <= 0) {
             out.set(0, 0, 0, 0)
             return
         }
-        val scale = minOf(vw.toFloat() / iw, vh.toFloat() / ih)
+        val scale = maxOf(vw.toFloat() / iw, vh.toFloat() / ih)
         val w = (iw * scale).toInt()
         val h = (ih * scale).toInt()
         val l = (vw - w) / 2

@@ -2,7 +2,9 @@
 #include <jni.h>
 #include <android/log.h>
 #include <errno.h>
+#if __ANDROID_API__ >= 28
 #include <spawn.h>
+#endif
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -37,11 +39,24 @@ Java_com_lex_nimbusvm_NativeQemu_spawn(JNIEnv *env, jclass, jobjectArray argv) {
         cargv[i] = storage[i].data();
     }
     pid_t pid = 0;
+#if __ANDROID_API__ >= 28
     int rc = posix_spawn(&pid, cargv[0], nullptr, nullptr, cargv.data(), environ);
     if (rc != 0) {
         LOGE("posix_spawn(%s) failed: %s", cargv[0], strerror(rc));
         return -rc;
     }
+#else
+    /* posix_spawn is API 28+; proof-27 builds use fork/exec. */
+    pid = fork();
+    if (pid < 0) {
+        LOGE("fork(%s) failed: %s", cargv[0], strerror(errno));
+        return -errno;
+    }
+    if (pid == 0) {
+        execve(cargv[0], cargv.data(), environ);
+        _exit(127);
+    }
+#endif
     LOGI("spawned qemu pid=%d", (int) pid);
     return (jint) pid;
 }

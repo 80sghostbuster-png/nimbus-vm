@@ -126,11 +126,11 @@ object IsoInspector {
             val files = linkedMapOf<String, IsoEntry>()
             indexIso(raf, files)
             if (files.isEmpty()) return@use null
-            val kernelEnt = findEntry(files, "INSTALL.A64/VMLINUZ") ?: return@use null
-            val gtkEnt = findEntry(files, "INSTALL.A64/GTK/INITRD.GZ")
-            val textEnt = findEntry(files, "INSTALL.A64/INITRD.GZ")
-            val initrdEnt = gtkEnt ?: textEnt ?: return@use null
-            val graphical = gtkEnt != null
+            val parts = findArm64InstallerParts(files) ?: return@use null
+            val kernelEnt = parts.kernel
+            val initrdEnt = parts.initrd
+            val graphical = parts.graphical
+            val initrdPath = parts.initrdPath
             destDir.mkdirs()
             val kernelOut = File(destDir, "vmlinuz")
             val initrdOut = File(destDir, "initrd.gz")
@@ -150,10 +150,56 @@ object IsoInspector {
             }
             val grub = findEntry(files, "BOOT/GRUB/GRUB.CFG") ?: findEntry(files, "BOOT/GRUB/GRUB.CFG")
             val grubText = if (grub != null) extractToString(raf, grub) else ""
-            val rawAppend = parseLinuxAppend(grubText, if (graphical) "/install.a64/gtk/initrd.gz" else "/install.a64/initrd.gz")
+            val rawAppend = parseLinuxAppend(grubText, initrdPath)
                 ?: "console=tty0"
             Arm64Installer(kernelOut, initrdOut, sanitizeInstallerAppend(rawAppend), graphical)
         }
+    }
+
+    private data class Arm64IsoParts(
+        val kernel: IsoEntry,
+        val initrd: IsoEntry,
+        val graphical: Boolean,
+        val initrdPath: String,
+    )
+
+    /**
+     * Debian/Kali netinst ISOs use /install.a64/{vmlinuz,gtk/initrd.gz}.
+     * The arm64 netboot mini.iso (text ~197 MB, gtk ~233 MB — not the
+     * historical ~50 MB x86 mini.iso) typically lays the kernel out as
+     * /debian-installer/arm64/linux plus gtk or text initrd.gz, or at the
+     * ISO root as /linux + /initrd.gz.
+     */
+    private fun findArm64InstallerParts(files: Map<String, IsoEntry>): Arm64IsoParts? {
+        val candidates = listOf(
+            Triple("INSTALL.A64/VMLINUZ", "INSTALL.A64/GTK/INITRD.GZ", "INSTALL.A64/INITRD.GZ"),
+            Triple("INSTALL.A64/LINUX", "INSTALL.A64/GTK/INITRD.GZ", "INSTALL.A64/INITRD.GZ"),
+            Triple("DEBIAN-INSTALLER/ARM64/LINUX", "DEBIAN-INSTALLER/ARM64/GTK/INITRD.GZ", "DEBIAN-INSTALLER/ARM64/INITRD.GZ"),
+            Triple("DEBIAN-INSTALLER/ARM64/VMLINUZ", "DEBIAN-INSTALLER/ARM64/GTK/INITRD.GZ", "DEBIAN-INSTALLER/ARM64/INITRD.GZ"),
+            Triple("LINUX", "GTK/INITRD.GZ", "INITRD.GZ"),
+        )
+        for ((k, gtk, text) in candidates) {
+            val kernel = findEntry(files, k) ?: continue
+            val gtkEnt = findEntry(files, gtk)
+            val textEnt = findEntry(files, text)
+            val initrd = gtkEnt ?: textEnt ?: continue
+            val path = "/" + (if (gtkEnt != null) gtk else text).lowercase()
+            return Arm64IsoParts(kernel, initrd, gtkEnt != null, path)
+        }
+        // Last resort: any vmlinuz/linux plus a gtk-preferring initrd.gz.
+        val kernel = files.values.firstOrNull { e ->
+            val n = e.path.substringAfterLast('/').uppercase()
+            n == "VMLINUZ" || n == "VMLINUZ." || n == "LINUX" || n == "LINUX."
+        }
+        if (kernel != null) {
+            val gtkEnt = files.values.firstOrNull { it.path.uppercase().contains("/GTK/") && it.path.uppercase().contains("INITRD") }
+            val textEnt = files.values.firstOrNull { it.path.uppercase().contains("INITRD") }
+            val initrd = gtkEnt ?: textEnt
+            if (initrd != null) {
+                return Arm64IsoParts(kernel, initrd, gtkEnt != null, "/" + initrd.path.trimStart('/'))
+            }
+        }
+        return null
     }
 
     private fun findEntry(files: Map<String, IsoEntry>, path: String): IsoEntry? {

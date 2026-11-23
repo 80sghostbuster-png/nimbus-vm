@@ -32,6 +32,9 @@ class QemuEngine(private val context: Context) {
         val secureBoot: Boolean = false,
         val graphics: Boolean = true,
         val extraArgs: List<String> = emptyList(),
+        val cpuModel: String = BootSettings.defaultProfile.cpuModel,
+        val tcgThread: String = BootSettings.defaultProfile.tcgThread,
+        val rawVars: Boolean = false,
     )
 
     enum class Arch { ARM64, X86_64 }
@@ -79,6 +82,25 @@ class QemuEngine(private val context: Context) {
 
     fun vncSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
         File(workDir(vmId), "vnc.sock")
+
+    /**
+     * Guest framebuffer sized to the phone's landscape aspect so the installer
+     * can fill the display without wide letterbox bars. Long side is capped
+     * at 1920 to keep TCG cost reasonable. ramfb itself has no xres property
+     * (firmware programs the mode via fw_cfg); virtio-gpu uses these values
+     * directly.
+     */
+    fun landscapeFbSize(): Pair<Int, Int> {
+        val dm = context.resources.displayMetrics
+        val long = maxOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(640)
+        val short = minOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(360)
+        val cap = 1920
+        val scale = if (long > cap) cap.toFloat() / long else 1f
+        fun even(v: Int) = (v and 0x7ffffffe).coerceAtLeast(2)
+        val w = even((long * scale).toInt().coerceIn(640, cap))
+        val h = even((short * scale).toInt().coerceIn(360, cap))
+        return w to h
+    }
 
     fun serialSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
         File(workDir(vmId), "serial.sock")
@@ -216,7 +238,7 @@ class QemuEngine(private val context: Context) {
         val args = mutableListOf(
             qemu.absolutePath,
             "-L", data.absolutePath,
-            "-accel", "tcg,thread=multi,tb-size=128",
+            "-accel", "tcg,thread=${cfg.tcgThread},tb-size=128",
             "-smp", cfg.cpus.toString(),
             "-m", memoryMb.toString(),
             "-display", "none",
@@ -250,7 +272,7 @@ class QemuEngine(private val context: Context) {
                 val acpi = if (installer != null) "off" else "on"
                 args += listOf(
                     "-machine", "virt,gic-version=3,virtualization=off,acpi=$acpi",
-                    "-cpu", "max,pauth-impdef=on",
+                    "-cpu", cfg.cpuModel,
                 )
                 if (installer != null) {
                     // -kernel installer (gtk or text): ramfb provides /dev/fb0
@@ -260,15 +282,22 @@ class QemuEngine(private val context: Context) {
                     args += listOf("-device", "ramfb,id=ramfb0")
                 } else {
                     // Firmware/GRUB and disk boots use virtio-gpu.
-                    args += listOf("-device", "virtio-gpu-pci,id=gpu0,xres=1280,yres=800")
+                    val (fbW, fbH) = landscapeFbSize()
+                    args += listOf("-device", "virtio-gpu-pci,id=gpu0,xres=$fbW,yres=$fbH")
                 }
                 val code = if (cfg.secureBoot) "AAVMF_CODE.secboot.fd" else "AAVMF_CODE.fd"
                 val varsTemplate = if (cfg.secureBoot) "AAVMF_VARS.ms.fd" else "AAVMF_VARS.fd"
                 val vars = File(work, "vars-arm64.fd")
                 if (!vars.exists()) File(fw, varsTemplate).copyTo(vars, overwrite = false)
+                val varsDrive = if (cfg.rawVars) {
+                    val raw = ensureRawVars(vars, cfg.vmId)
+                    "if=pflash,format=raw,file=${raw.absolutePath}"
+                } else {
+                    "if=pflash,format=qcow2,file=${ensureQcowVars(vars, cfg.vmId).absolutePath}"
+                }
                 args += listOf(
                     "-drive", "if=pflash,format=raw,readonly=on,file=${File(fw, code).absolutePath}",
-                    "-drive", "if=pflash,format=qcow2,file=${ensureQcowVars(vars, cfg.vmId).absolutePath}",
+                    "-drive", varsDrive,
                 )
                 if (cfg.tpm) {
                     val sock = File(work, "swtpm.sock")
@@ -283,7 +312,7 @@ class QemuEngine(private val context: Context) {
                 args += listOf(
                     "-machine", "q35,accel=tcg",
                     "-cpu", "qemu64",
-                    "-device", "virtio-vga,id=gpu0",
+                    "-device", "virtio-vga,id=gpu0,xres=${landscapeFbSize().first},yres=${landscapeFbSize().second}",
                 )
                 val code = if (cfg.secureBoot) "OVMF_CODE_4M.secboot.fd" else "OVMF_CODE_4M.fd"
                 val varsTemplate = if (cfg.secureBoot) "OVMF_VARS_4M.ms.fd" else "OVMF_VARS_4M.fd"
@@ -341,6 +370,15 @@ class QemuEngine(private val context: Context) {
         return args
     }
 
+    /** Writable raw VARS copy (no qcow2 overlay). Fresh file so a prior qcow2 is not reused. */
+    private fun ensureRawVars(template: File, vmId: String): File {
+        val raw = File(workDir(vmId), template.nameWithoutExtension + "-raw.fd")
+        if (!raw.exists() || raw.length() == 0L) {
+            template.copyTo(raw, overwrite = true)
+        }
+        return raw
+    }
+
     private fun ensureQcowVars(rawVars: File, vmId: String): File {
         val qcow = File(workDir(vmId), rawVars.nameWithoutExtension + ".qcow2")
         if (!qcow.exists()) {
@@ -384,7 +422,14 @@ class QemuEngine(private val context: Context) {
         val vnc = File(currentWorkDir, "vnc.sock").also { if (it.exists()) it.delete() }
         File(currentWorkDir, "serial.sock").let { if (it.exists()) it.delete() }
         val log = qemuLogFile(cfg.vmId)
-        log.writeText("")
+        if (log.exists() && log.length() > 0) {
+            log.appendText("\n======= qemu restart ${java.util.Date()} =======\n")
+        } else {
+            log.writeText("")
+        }
+        val self = selfTest()
+        File(workDir(cfg.vmId), "selftest.txt").writeText(self)
+        appendNote(serialFile, "[nimbus self-test]\n$self")
         stopSwtpm()
         val swtpm = if (cfg.tpm) startSwtpm(cfg.vmId) else null
         swtpmProcess = swtpm
@@ -452,18 +497,125 @@ class QemuEngine(private val context: Context) {
     }
 
     fun qmpAt(sock: File, execute: String, arguments: JSONObject? = null): String {
+        val (greeting, cap, result) = qmpRaw(sock, execute, arguments)
+        return "greeting=$greeting cap=$cap result=$result"
+    }
+
+    /** QMP reply object (events are skipped). */
+    fun qmpResult(execute: String, arguments: JSONObject? = null): JSONObject {
+        val sock = qmpFile ?: error("no QMP socket")
+        val (_, _, result) = qmpRaw(sock, execute, arguments)
+        return JSONObject(result)
+    }
+
+    private fun qmpRaw(sock: File, execute: String, arguments: JSONObject? = null): Triple<String, String, String> {
         LocalSocket().use { ls ->
             ls.connect(LocalSocketAddress(sock.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
             val input = ls.inputStream
             val output = ls.outputStream
             val greeting = readJsonLine(input)
             writeJson(output, JSONObject().put("execute", "qmp_capabilities"))
-            val cap = readJsonLine(input)
+            val cap = readQmpReply(input)
             val cmd = JSONObject().put("execute", execute)
             if (arguments != null) cmd.put("arguments", arguments)
             writeJson(output, cmd)
-            val result = readJsonLine(input)
-            return "greeting=$greeting cap=$cap result=$result"
+            val result = readQmpReply(input)
+            return Triple(greeting, cap, result)
+        }
+    }
+
+    private fun readQmpReply(input: java.io.InputStream): String {
+        repeat(16) {
+            val line = readJsonLine(input)
+            if (line.isBlank()) return line
+            val obj = try { JSONObject(line) } catch (_: Exception) { return line }
+            if (obj.has("event")) return@repeat
+            return line
+        }
+        return ""
+    }
+
+    /**
+     * Compact query-status + CPU PC (via HMP "info registers") for the Serial log.
+     */
+    fun diagnosticSnapshot(): String {
+        val status = try {
+            val r = qmpResult("query-status")
+            r.optJSONObject("return")?.optString("status") ?: r.toString().take(200)
+        } catch (e: Exception) {
+            "status-error: ${e.message}"
+        }
+        val regs = try {
+            val r = qmpResult(
+                "human-monitor-command",
+                JSONObject().put("command-line", "info registers"),
+            )
+            r.optString("return")
+        } catch (e: Exception) {
+            "regs-error: ${e.message}"
+        }
+        val pc = Regex("""(?i)\bPC[=:]\s*([0-9A-Fa-f]+)""").find(regs)?.groupValues?.get(1)
+            ?: Regex("""(?i)\bpc[=:]\s*([0-9A-Fa-f]+)""").find(regs)?.groupValues?.get(1)
+        val pstate = Regex("""(?i)PSTATE[=:]\s*([0-9A-Fa-fx]+)""").find(regs)?.groupValues?.get(1)
+        val compactRegs = if (pc != null) {
+            "PC=0x$pc" + (if (pstate != null) " PSTATE=$pstate" else "")
+        } else {
+            regs.replace("\n", " ").take(400)
+        }
+        return "status=$status $compactRegs"
+    }
+
+    fun selfTest(): String {
+        unpackAll()
+        val lines = mutableListOf<String>()
+        fun runVersion(bin: File, label: String) {
+            if (!bin.exists()) {
+                lines += "$label: MISSING ${bin.absolutePath}"
+                return
+            }
+            lines += "$label: ${bin.absolutePath} ${bin.length()} bytes"
+            try {
+                val pb = ProcessBuilder(bin.absolutePath, "-version")
+                applyQemuEnv(pb, "debug")
+                pb.redirectErrorStream(true)
+                val proc = pb.start()
+                val out = proc.inputStream.bufferedReader().readText().trim()
+                val ok = proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                if (!ok) {
+                    proc.destroyForcibly()
+                    lines += "$label -version: timeout"
+                } else {
+                    lines += "$label -version (exit ${proc.exitValue()}): ${out.take(400)}"
+                }
+            } catch (e: Exception) {
+                lines += "$label -version failed: ${e.message}"
+            }
+        }
+        runVersion(qemuBinary(Arch.ARM64), "qemu-system-aarch64")
+        runVersion(qemuImg(), "qemu-img")
+        val fw = firmwareDir()
+        for (name in listOf("AAVMF_CODE.fd", "AAVMF_VARS.fd", "QEMU_EFI.fd")) {
+            val f = File(fw, name)
+            lines += if (f.exists()) "firmware $name: ${f.length()} bytes" else "firmware $name: MISSING"
+        }
+        val rom = File(qemuDataDir(), "efi-virtio.rom")
+        lines += if (rom.exists() && rom.length() > 0) {
+            "efi-virtio.rom: ${rom.length()} bytes"
+        } else {
+            "efi-virtio.rom: MISSING"
+        }
+        val text = lines.joinToString("\n")
+        File(context.filesDir, "selftest.txt").writeText(text + "\n")
+        Log.i(TAG, "self-test:\n$text")
+        return text
+    }
+
+    fun appendNote(file: File, text: String) {
+        try {
+            file.parentFile?.mkdirs()
+            file.appendText("\n$text\n")
+        } catch (e: Exception) {
+            Log.w(TAG, "appendNote failed: $e")
         }
     }
 

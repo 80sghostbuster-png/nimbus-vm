@@ -1,3 +1,25 @@
+# v0.2.5-test (versionCode 8) — real-device test pre-release
+
+Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. This is not a verified fix of the phone stall — it is a signed candidate for Lex to try on the phone (and for Firebase Test Lab).
+
+v0.2.4 still showed the AAVMF banner overnight with no `Booting Linux`. Box-only x86 TCG proofs and a nested Android emulator were dropped as proof. This build adds instrumentation on the phone itself, plus a couple of fallback argv changes if the kernel never starts.
+
+## What changed
+
+- Landscape / immersive fullscreen display, guest framebuffer scaled to fill, slim translucent toolbar (Hide, Touch, Serial, Keyboard, Power). `DisplayCutoutApi28` cutout guard (API 28+).
+- Official API 28 jniLibs (unchanged). minSdk 28.
+- Startup self-test (QEMU/qemu-img `-version`, firmware, `efi-virtio.rom`) written to Serial and `selftest.txt`.
+- While booting, every 5s: QMP `query-status` and HMP `info registers` (CPU PC) appended to Serial, plus new QEMU stderr.
+- Auto-fallback (Advanced → “Installer recovery”, default Auto): if there is no UEFI banner within 90s, or no `Booting Linux` within 120s after the banner, restart with `-cpu cortex-a72` and `thread=single`, then with raw pflash VARS instead of qcow2. The setting can also pin one profile.
+- ISO URL extra on the library activity (`iso_url`, optional `iso_sha256`) for on-device download/boot. Add ISO picker is unchanged.
+- IsoInspector also looks for Debian arm64 mini.iso layouts (`/debian-installer/arm64/linux`, `/linux`, plus gtk/text initrd). Current Debian arm64 mini.iso is ~197 MB (text) / ~233 MB (gtk), not the historical ~50 MB x86 image.
+
+## What Lex should do
+
+Install `Nimbus-VM.apk` over 0.2.4 (same signing key, versionCode 8). Boot the same Kali VM. Watch Serial: you should see `[nimbus self-test]`, then `[nimbus qmp …s] status=… PC=…` every 5 seconds. If the kernel starts, Serial will show `Booting Linux` and fallback will stop. If it stalls after the banner, wait about two minutes for the first auto-restart (cortex-a72 + thread=single). Leave a Serial screenshot and the elapsed time either way.
+
+This is a test build. A stable 0.2.5 will be published only after a real-device proof (language screen in landscape with the toolbar visible).
+
 # v0.2.4 (versionCode 7) — installer boot progress and TCG load
 
 Box-verified Sunday Nov 22, 2026, America/Chicago. Not yet phone-tested at publish time.

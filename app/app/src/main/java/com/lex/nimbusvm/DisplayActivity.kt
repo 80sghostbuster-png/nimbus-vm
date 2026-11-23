@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ActivityInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.os.Handler
@@ -11,13 +13,18 @@ import android.os.IBinder
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
+import android.view.Window
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -94,9 +101,11 @@ class DisplayActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        applyImmersiveFullscreen()
         setContentView(R.layout.activity_display)
+        applyImmersiveFullscreen()
         vmId = intent.getStringExtra(EXTRA_VM_ID) ?: ""
         startOnBind = intent.getBooleanExtra(EXTRA_START, false)
         screen = findViewById(R.id.screen)
@@ -397,6 +406,40 @@ class DisplayActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    override fun onResume() {
+        super.onResume()
+        applyImmersiveFullscreen()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersiveFullscreen()
+    }
+
+    /**
+     * Lock landscape, hide the Android status and nav bars, and draw under
+     * the display cutout so the guest can fill the phone's landscape screen.
+     * The slim toolbar stays overlaid at the top and is not part of the
+     * system bars — Hide still tucks it until the user swipes the top edge.
+     */
+    private fun applyImmersiveFullscreen() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        // layoutInDisplayCutoutMode is API 28+; a direct field write crashes
+        // with NoSuchFieldError on API 27 (the route-1 proof emulator).
+        // Keep the access in a separately-loaded class so ART on 27 never
+        // verifies the missing field. Behavior on API 28+ is unchanged.
+        if (Build.VERSION.SDK_INT >= 28) {
+            DisplayCutoutApi28.applyShortEdges(window)
+        }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
     override fun onDestroy() {
         ui.removeCallbacks(refreshRunnable)
         ui.removeCallbacks(serialRunnable)
@@ -410,5 +453,17 @@ class DisplayActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_VM_ID = "vm_id"
         const val EXTRA_START = "start"
+    }
+}
+
+
+/** API 28+ cutout mode. Loaded only when SDK_INT >= 28. */
+@RequiresApi(28)
+internal object DisplayCutoutApi28 {
+    fun applyShortEdges(window: Window) {
+        val lp = window.attributes
+        lp.layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        window.attributes = lp
     }
 }

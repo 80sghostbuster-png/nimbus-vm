@@ -32,8 +32,9 @@
         <activity
             android:name=".DisplayActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout|navigation"
-            android:theme="@style/Theme.NimbusVM"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout|navigation|smallestScreenSize|uiMode"
+            android:theme="@style/Theme.NimbusVM.Display"
             android:windowSoftInputMode="adjustNothing" />
 
         <activity
