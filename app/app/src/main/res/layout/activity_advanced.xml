@@ -140,7 +140,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="If Serial never shows “Booting Linux” after the UEFI banner, auto-fallback restarts with cortex-a72 + thread=single, then raw pflash VARS."
+            android:text="If Serial stops growing for 60 seconds (even after the kernel has started), auto-fallback restarts with the next profile. The default installer CPU is now cortex-a72 + thread=single; the old max+thread=multi profile is still listed as Legacy 0.2.5."
             android:textColor="#8A8680"
             android:textSize="12sp" />
 

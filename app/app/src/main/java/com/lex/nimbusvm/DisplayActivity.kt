@@ -40,8 +40,10 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var bootOverlay: View
     private lateinit var bootOverlayTitle: TextView
     private lateinit var bootOverlayBody: TextView
-    private lateinit var serialPanel: ScrollView
+    private lateinit var serialPanel: android.widget.LinearLayout
+    private lateinit var serialScroll: ScrollView
     private lateinit var serialLog: TextView
+    private lateinit var btnJumpLatest: Button
     private lateinit var btnTouch: Button
     private lateinit var btnSerial: Button
     private var bound = false
@@ -52,6 +54,10 @@ class DisplayActivity : AppCompatActivity() {
     private var bootStartedAt = 0L
     private var lastExtractLog = ""
     private var lastSerialText = ""
+    private var serialFollow = true
+    private var serialBytesShown = 0L
+    private var qemuBytesShown = 0L
+    private var extractShown = false
     private val refreshRunnable = object : Runnable {
         override fun run() {
             val c = vnc
@@ -116,7 +122,20 @@ class DisplayActivity : AppCompatActivity() {
         bootOverlayTitle = findViewById(R.id.bootOverlayTitle)
         bootOverlayBody = findViewById(R.id.bootOverlayBody)
         serialPanel = findViewById(R.id.serialPanel)
+        serialScroll = findViewById(R.id.serialScroll)
         serialLog = findViewById(R.id.serialLog)
+        btnJumpLatest = findViewById(R.id.btnJumpLatest)
+        btnJumpLatest.setOnClickListener { jumpToLatestSerial() }
+        serialScroll.setOnScrollChangeListener { _, _, _, _, _ ->
+            val atBottom = serialIsAtBottom()
+            if (atBottom) {
+                serialFollow = true
+                btnJumpLatest.visibility = View.GONE
+            } else {
+                serialFollow = false
+                if (serialPanel.visibility == View.VISIBLE) btnJumpLatest.visibility = View.VISIBLE
+            }
+        }
         btnTouch = findViewById(R.id.btnTouch)
         btnSerial = findViewById(R.id.btnSerial)
 
@@ -148,6 +167,8 @@ class DisplayActivity : AppCompatActivity() {
             val show = serialPanel.visibility != View.VISIBLE
             serialPanel.visibility = if (show) View.VISIBLE else View.GONE
             if (show) {
+                serialFollow = true
+                btnJumpLatest.visibility = View.GONE
                 refreshSerial()
                 connectSerialIo()
             }
@@ -218,29 +239,93 @@ class DisplayActivity : AppCompatActivity() {
     private fun stripAnsi(raw: String): String =
         raw.replace("\u001B\\[[0-9;?]*[A-Za-z]".toRegex(), "").replace("\r", "")
 
+    private fun serialIsAtBottom(): Boolean {
+        val child = serialScroll.getChildAt(0) ?: return true
+        val slop = (24 * resources.displayMetrics.density).toInt()
+        return child.bottom - (serialScroll.height + serialScroll.scrollY) <= slop
+    }
+
+    private fun scrollSerialToBottom() {
+        serialScroll.post {
+            val child = serialScroll.getChildAt(0) ?: return@post
+            val y = (child.height - serialScroll.height).coerceAtLeast(0)
+            serialScroll.scrollTo(0, y)
+        }
+    }
+
+    private fun jumpToLatestSerial() {
+        serialFollow = true
+        btnJumpLatest.visibility = View.GONE
+        scrollSerialToBottom()
+    }
+
+    /** Read newly appended bytes from [file] since [already], handling truncation. */
+    private fun readNewText(file: File?, already: Long, capFirst: Int = 0): Pair<String, Long> {
+        if (file == null || !file.exists()) return "" to 0L
+        val len = file.length()
+        var start = already
+        if (len < start) start = 0L
+        if (start == 0L && capFirst > 0 && len > capFirst) start = len - capFirst
+        if (len <= start) return "" to len
+        val n = (len - start).toInt()
+        val buf = ByteArray(n)
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            raf.seek(start)
+            raf.readFully(buf)
+        }
+        return stripAnsi(String(buf, Charsets.UTF_8)) to len
+    }
+
     private fun refreshSerial() {
         val svc = service
+        val follow = serialFollow
+        val needExtract = !extractShown
+        val serOff = serialBytesShown
+        val qemuOff = qemuBytesShown
         thread {
-            val parts = mutableListOf<String>()
             val extract = svc?.engine?.workDir(vmId)?.let { File(it, "installer-extract.txt") }
-            if (extract != null && extract.exists()) {
-                parts += "--- installer ---\n" + extract.readText().trim()
-            }
-            val qlog = svc?.engine?.qemuLogFile(vmId)
-            if (qlog != null && qlog.exists()) {
-                parts += "--- qemu ---\n" + qlog.readText().takeLast(4000).trim()
-            }
-            val serial = serialFile
-            if (serial != null && serial.exists()) {
-                parts += "--- serial ---\n" + stripAnsi(serial.readText()).takeLast(8000).trim()
-            }
-            val text = parts.joinToString("\n\n")
-            val serialOnly = if (serial != null && serial.exists()) stripAnsi(serial.readText()) else ""
             val extractText = extract?.takeIf { it.exists() }?.readText().orEmpty()
+            val qlog = svc?.engine?.qemuLogFile(vmId)
+            val serial = serialFile
+            val truncated = (serial != null && serial.exists() && serial.length() < serOff) ||
+                (qlog != null && qlog.exists() && qlog.length() < qemuOff)
+            val (newQemu, qemuEnd) = readNewText(qlog, if (truncated) 0L else qemuOff, capFirst = 4000)
+            val (newSerial, serEnd) = readNewText(serial, if (truncated) 0L else serOff, capFirst = 8000)
+            val serialOnly = if (serial != null && serial.exists()) {
+                // Overlay only needs a tail, not the whole file.
+                stripAnsi(serial.readText().takeLast(16_000))
+            } else ""
             runOnUiThread {
-                if (text.isNotEmpty() && serialLog.text != text) {
-                    serialLog.text = text
-                    serialPanel.post { serialPanel.fullScroll(View.FOCUS_DOWN) }
+                if (truncated) {
+                    serialLog.text = ""
+                    extractShown = false
+                    qemuBytesShown = 0L
+                    serialBytesShown = 0L
+                }
+                val chunks = StringBuilder()
+                if (needExtract && extractText.isNotEmpty() && !extractShown) {
+                    chunks.append("--- installer ---\n").append(extractText.trim()).append("\n\n")
+                    extractShown = true
+                }
+                if (newQemu.isNotEmpty()) {
+                    if (qemuBytesShown == 0L) chunks.append("--- qemu ---\n")
+                    chunks.append(newQemu)
+                    qemuBytesShown = qemuEnd
+                }
+                if (newSerial.isNotEmpty()) {
+                    if (serialBytesShown == 0L) chunks.append("--- serial ---\n")
+                    chunks.append(newSerial)
+                    serialBytesShown = serEnd
+                } else {
+                    serialBytesShown = serEnd
+                }
+                if (chunks.isNotEmpty()) {
+                    serialLog.append(chunks)
+                    if (follow || serialFollow) {
+                        serialFollow = true
+                        btnJumpLatest.visibility = View.GONE
+                        scrollSerialToBottom()
+                    }
                 }
                 updateBootOverlay(extractText, serialOnly)
             }
@@ -270,10 +355,12 @@ class DisplayActivity : AppCompatActivity() {
             extracted -> "Booting… (installer)"
             else -> "Booting… (firmware)"
         }
-        val wait = " The display can stay dark for a few minutes on a phone — wait for this timer, and open Serial for live progress."
+        val stalled = "auto-fallback" in low || "serial quiet" in low
+        val wait = " The display can stay dark for several minutes on a phone — watch this timer and open Serial for live QMP / ramfb counts."
         val body = when {
             extractFailed -> extractLog.trim() + " Open Serial for the QEMU command line and firmware log."
-            kernelStarted -> "Kernel has started. Waiting for the installer to paint." + wait
+            stalled -> "Serial stopped growing, so the kernel may have stalled. Auto-fallback will restart with the next CPU profile (default is cortex-a72 + thread=single)." + wait
+            kernelStarted -> "Kernel has started. Unpacking the installer initrd (~68 MB) on phone TCG can take many minutes; Serial should keep growing. A QMP line every 5s reports the CPU PC and, every 30s, how many non-black ramfb pixels have been painted." + wait
             extracted -> "Installer kernel extracted. Serial should show “Booting Linux” once the kernel starts." + wait
             else -> "Guest display is not active yet. The machine is still booting — open Serial for the live firmware log and the QEMU command line."
         }

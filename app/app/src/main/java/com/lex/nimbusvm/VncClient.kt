@@ -107,12 +107,17 @@ class VncClient(
     }
 
     fun requestUpdate(incremental: Boolean) {
-        if (fbW == 0 || fbH == 0) return
+        // A 0x0 desktop (ramfb not yet programmed) must still send a
+        // FramebufferUpdateRequest, otherwise QEMU never delivers the
+        // DesktopSize / ExtendedDesktopSize message when the guest
+        // switches to 800x600 and the viewer stays on "Display connected".
+        val w = fbW.coerceAtLeast(1)
+        val h = fbH.coerceAtLeast(1)
         val buf = ByteArray(10)
         buf[0] = 3
         buf[1] = if (incremental) 1 else 0
-        buf[6] = (fbW shr 8).toByte(); buf[7] = fbW.toByte()
-        buf[8] = (fbH shr 8).toByte(); buf[9] = fbH.toByte()
+        buf[6] = (w shr 8).toByte(); buf[7] = w.toByte()
+        buf[8] = (h shr 8).toByte(); buf[9] = h.toByte()
         write(buf)
     }
 
@@ -195,9 +200,21 @@ class VncClient(
     }
 
     private fun allocFb(w: Int, h: Int) {
-        fbW = w; fbH = h
+        val oldW = fbW
+        val oldH = fbH
+        fbW = w
+        fbH = h
+        if (w <= 0 || h <= 0) {
+            Log.i(TAG, "desktop size ${oldW}x${oldH} -> ${w}x${h} (empty; waiting for ramfb)")
+            pixels = IntArray(0)
+            fb = null
+            return
+        }
         pixels = IntArray(w * h)
         fb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        if (oldW != w || oldH != h) {
+            Log.i(TAG, "desktop size ${oldW}x${oldH} -> ${w}x${h}; next update will be full")
+        }
     }
 
     private fun readLoop() {
@@ -282,10 +299,12 @@ class VncClient(
             }
             i++
         }
-        if (dirty) {
-            val bmp = fb ?: return
-            bmp.setPixels(pixels, 0, fbW, 0, 0, fbW, fbH)
-            listener.onFrame(bmp, fbW, fbH)
+        if (dirty && fbW > 0 && fbH > 0) {
+            val bmp = fb
+            if (bmp != null) {
+                bmp.setPixels(pixels, 0, fbW, 0, 0, fbW, fbH)
+                listener.onFrame(bmp, fbW, fbH)
+            }
         }
         requestUpdate(!resized)
     }

@@ -1,3 +1,24 @@
+# v0.2.6-test (versionCode 9) — mid-kernel stall fallback and Serial stability
+
+Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4 (or whatever is still Latest — not this tag). Not a verified fix until Lex confirms the language screen on the phone.
+
+## What Lex showed on v0.2.5-test
+
+On a Pixel 6 Pro (Tensor G1, default profile `cpu=max,pauth-impdef=on thread=multi vars=qcow2`) the kernel *does* start quickly (UEFI banner and kernel output at 5s, QMP PC in kernel VA, earlycon lines). The earlier “stuck after the banner” report was missing Serial console, not a firmware hang. After minutes, Serial stopped mid-line at `[    0.000000] OF: reserved mem: Res` — a real early-boot freeze. Auto-fallback had already cancelled itself because any kernel output counted as success.
+
+## What changed
+
+- **Auto-fallback keys on a progress stall**: no new guest Serial bytes for 60 seconds, even after the kernel has started. It then tries `max + thread=single`, then `cortex-a72 + thread=single + raw VARS`.
+- **Safer default** for installer boots: `-cpu cortex-a72` and `thread=single`. The old 0.2.5 `max + thread=multi` profile remains as “Legacy 0.2.5” in Advanced. Phone evidence implicated that combination; qemu-user on this x86 box did *not* reproduce the mid-line `OF: reserved mem` hang (both max+multi and a72+single got past that line), so this default is a cautious change for a real weakly-ordered arm64 host, not a box-proven root cause.
+- QMP `query-status` + `info registers` PC every 5s for the whole boot, plus a QMP `screendump` every 30s with the non-black ramfb pixel count in Serial.
+- Overlay explains that unpacking the ~68 MB installer initrd can take many minutes, and that a quiet Serial will trigger fallback.
+- VNC: `FramebufferUpdateRequest` is sent even when the desktop is 0×0, so a later DesktopSize / 800×600 ramfb resize is not missed (the viewer no longer stays on “Display connected” for that reason). Periodic full refresh was already present.
+- **Serial panel no longer jumps**: text is appended incrementally, scroll position is preserved, auto-follow only when already at the bottom, “Jump to latest” when you scroll up, and Serial opens at the bottom.
+
+## What Lex should do
+
+Install `Nimbus-VM.apk` over 0.2.5-test (same signing key, versionCode 9). Boot the same Kali VM. The first attempt should now be cortex-a72 + thread=single. Open Serial: it should stay put while you scroll up. If this profile also stalls for 60s, Auto will restart. Report whether Serial gets past `OF: reserved mem` and whether the language screen fills the landscape display with the toolbar visible.
+
 # v0.2.5-test (versionCode 8) — real-device test pre-release
 
 Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4. This is not a verified fix of the phone stall — it is a signed candidate for Lex to try on the phone (and for Firebase Test Lab).

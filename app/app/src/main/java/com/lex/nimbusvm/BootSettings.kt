@@ -2,7 +2,7 @@ package com.lex.nimbusvm
 
 import android.content.Context
 
-/** One QEMU argv flavour used to work around a post-UEFI-banner stall. */
+/** One QEMU argv flavour used to work around a post-UEFI / mid-kernel stall. */
 data class BootProfile(
     val id: String,
     val label: String,
@@ -15,29 +15,34 @@ data class BootProfile(
 }
 
 /**
- * Hidden installer-recovery setting. Default is auto-fallback: if the
- * Serial log never shows a kernel start after the AAVMF banner, restart
- * QEMU with the next candidate profile.
+ * Hidden installer-recovery setting.
+ *
+ * The v0.2.5-test default (`-cpu max,pauth-impdef=on` + `thread=multi`)
+ * started the kernel on Lex's Pixel 6 Pro but froze mid-line at
+ * `OF: reserved mem: Res`. Auto-fallback now keys on a *progress stall*
+ * (no new Serial bytes for [STALL_TIMEOUT_MS]), not on first kernel output.
+ * The safer default for installer boots is cortex-a72 + thread=single.
  */
 object BootSettings {
     const val PREFS = "nimbus_prefs"
     const val KEY_MODE = "boot_recovery"
     const val MODE_AUTO = "auto"
     const val MODE_DEFAULT = "default"
-    const val MODE_A72_SINGLE = "a72_single"
+    const val MODE_MAX_MULTI = "max_multi"
+    const val MODE_MAX_SINGLE = "max_single"
     const val MODE_A72_SINGLE_RAW = "a72_single_raw"
 
     val defaultProfile = BootProfile(
         id = "default",
-        label = "Default (max + thread=multi, qcow2 VARS)",
-        cpuModel = "max,pauth-impdef=on",
-        tcgThread = "multi",
+        label = "Default (cortex-a72 + thread=single, qcow2 VARS)",
+        cpuModel = "cortex-a72",
+        tcgThread = "single",
         rawVars = false,
     )
-    val a72Single = BootProfile(
-        id = "a72_single",
-        label = "cortex-a72 + thread=single",
-        cpuModel = "cortex-a72",
+    val maxSingle = BootProfile(
+        id = "max_single",
+        label = "max + pauth-impdef + thread=single",
+        cpuModel = "max,pauth-impdef=on",
         tcgThread = "single",
         rawVars = false,
     )
@@ -48,20 +53,27 @@ object BootSettings {
         tcgThread = "single",
         rawVars = true,
     )
-
-    val profiles: List<BootProfile> = listOf(defaultProfile, a72Single, a72SingleRaw)
-
-    val modeEntries: List<Pair<String, String>> = listOf(
-        MODE_AUTO to "Auto-fallback if the kernel never starts",
-        MODE_DEFAULT to defaultProfile.label,
-        MODE_A72_SINGLE to a72Single.label,
-        MODE_A72_SINGLE_RAW to a72SingleRaw.label,
+    val maxMulti = BootProfile(
+        id = "max_multi",
+        label = "Legacy 0.2.5 (max + thread=multi) — hangs on Pixel 6 Pro",
+        cpuModel = "max,pauth-impdef=on",
+        tcgThread = "multi",
+        rawVars = false,
     )
 
-    /** After the UEFI banner, wait this long for “Booting Linux” before a fallback. */
-    const val KERNEL_TIMEOUT_MS = 120_000L
-    /** After start, wait this long for any UEFI banner before treating it as a stall. */
-    const val BANNER_TIMEOUT_MS = 90_000L
+    /** Auto-fallback order. Legacy max+multi is opt-in only, not in this list. */
+    val profiles: List<BootProfile> = listOf(defaultProfile, maxSingle, a72SingleRaw)
+
+    val modeEntries: List<Pair<String, String>> = listOf(
+        MODE_AUTO to "Auto-fallback if Serial stops growing",
+        MODE_DEFAULT to defaultProfile.label,
+        MODE_MAX_SINGLE to maxSingle.label,
+        MODE_A72_SINGLE_RAW to a72SingleRaw.label,
+        MODE_MAX_MULTI to maxMulti.label,
+    )
+
+    /** No new Serial bytes for this long → treat as a stall and (if Auto) fall back. */
+    const val STALL_TIMEOUT_MS = 60_000L
 
     fun prefs(ctx: Context) =
         ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -73,9 +85,10 @@ object BootSettings {
     }
 
     fun initialProfile(ctx: Context): BootProfile = when (mode(ctx)) {
-        MODE_A72_SINGLE -> a72Single
+        MODE_MAX_SINGLE -> maxSingle
         MODE_A72_SINGLE_RAW -> a72SingleRaw
-        else -> defaultProfile
+        MODE_MAX_MULTI -> maxMulti
+        else -> defaultProfile // auto and default start here
     }
 
     fun nextAutoProfile(current: BootProfile): BootProfile? {
@@ -90,8 +103,9 @@ object BootSettings {
     }
 
     fun hasKernel(serial: String): Boolean {
-        // Do not match "earlycon" — that word appears in our own notes and argv.
         return serial.contains("Booting Linux") ||
-            serial.contains("Linux version ")
+            serial.contains("Linux version ") ||
+            serial.contains("earlycon: pl11") ||
+            serial.contains("Machine model: linux,dummy-virt")
     }
 }

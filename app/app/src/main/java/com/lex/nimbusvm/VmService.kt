@@ -1,5 +1,6 @@
 package com.lex.nimbusvm
 
+import android.graphics.BitmapFactory
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -106,11 +107,17 @@ class VmService : Service() {
         val startedAt = System.currentTimeMillis()
         val auto = BootSettings.mode(this) == BootSettings.MODE_AUTO
         val stderr = engine.qemuLogFile(id)
+        val dumpFile = File(engine.workDir(id), "qmp-screendump.png")
         monitorThread = Thread({
             var bannerAt = 0L
             var kernelAt = 0L
+            var kernelHinted = false
+            var painted = false
+            var lastSerialLen = if (serial.exists()) serial.length() else 0L
+            var lastGrowthAt = startedAt
             var stderrPos = if (stderr.exists()) stderr.length() else 0L
             var ticks = 0
+            var lastDumpAt = 0L
             while (gen == monitorGen && engine.isRunning) {
                 try {
                     Thread.sleep(5_000)
@@ -119,45 +126,75 @@ class VmService : Service() {
                 }
                 if (gen != monitorGen || !engine.isRunning) break
                 ticks++
-                val elapsedSec = (System.currentTimeMillis() - startedAt) / 1000
+                val now = System.currentTimeMillis()
+                val elapsedSec = (now - startedAt) / 1000
                 val snap = try {
                     engine.diagnosticSnapshot()
                 } catch (e: Exception) {
                     "qmp-error: ${e.message}"
                 }
-                engine.appendNote(serial, "[nimbus qmp ${elapsedSec}s profile=${profile.id}] $snap")
+                var extra = ""
+                if (now - lastDumpAt >= 30_000L) {
+                    lastDumpAt = now
+                    extra = try {
+                        engine.screendump(dumpFile)
+                        val counted = countNonBlackPixels(dumpFile)
+                        if (counted != null) {
+                            val (nonBlack, total, w, h) = counted
+                            if (nonBlack > 64) painted = true
+                            " ramfb=${w}x${h} nonblack=$nonBlack/$total"
+                        } else {
+                            " ramfb=screendump-unreadable"
+                        }
+                    } catch (e: Exception) {
+                        " ramfb=screendump-error: ${e.message}"
+                    }
+                }
+                val serLen = if (serial.exists()) serial.length() else 0L
+                if (serLen > lastSerialLen) {
+                    lastGrowthAt = now
+                    lastSerialLen = serLen
+                }
+                val quietSec = (now - lastGrowthAt) / 1000
+                engine.appendNote(
+                    serial,
+                    "[nimbus qmp ${elapsedSec}s profile=${profile.id}] $snap serial=${serLen}B quiet=${quietSec}s$extra",
+                )
+                // appendNote grew the file; don't treat our own notes as guest progress.
+                lastSerialLen = if (serial.exists()) serial.length() else lastSerialLen
                 stderrPos = appendNewStderr(stderr, serial, stderrPos)
+                lastSerialLen = if (serial.exists()) serial.length() else lastSerialLen
                 val text = tailText(serial, 256 * 1024)
                 if (bannerAt == 0L && BootSettings.hasBanner(text)) {
-                    bannerAt = System.currentTimeMillis()
+                    bannerAt = now
                     engine.appendNote(serial, "[nimbus] UEFI banner seen at ${elapsedSec}s")
+                    lastSerialLen = if (serial.exists()) serial.length() else lastSerialLen
                 }
                 if (kernelAt == 0L && BootSettings.hasKernel(text)) {
-                    kernelAt = System.currentTimeMillis()
-                    engine.appendNote(serial, "[nimbus] kernel output seen at ${elapsedSec}s — fallback cancelled")
+                    kernelAt = now
+                    engine.appendNote(
+                        serial,
+                        "[nimbus] kernel output seen at ${elapsedSec}s. The installer initrd is large (~68 MB); unpacking it on a phone can take many minutes. Serial should keep growing — if it stays quiet for 60s, auto-fallback will try the next profile.",
+                    )
+                    lastSerialLen = if (serial.exists()) serial.length() else lastSerialLen
+                    kernelHinted = true
                 }
-                if (kernelAt > 0L) continue
                 if (!auto) continue
-                val now = System.currentTimeMillis()
-                val stalled = if (bannerAt > 0L) {
-                    now - bannerAt >= BootSettings.KERNEL_TIMEOUT_MS
-                } else {
-                    now - startedAt >= BootSettings.BANNER_TIMEOUT_MS
-                }
+                if (painted) continue
+                val stalled = now - lastGrowthAt >= BootSettings.STALL_TIMEOUT_MS
                 if (!stalled) continue
                 val next = BootSettings.nextAutoProfile(profile)
                 if (next == null) {
                     engine.appendNote(
                         serial,
-                        "[nimbus] auto-fallback exhausted after ${profile.id}; leaving this session running",
+                        "[nimbus] auto-fallback exhausted after ${profile.id} (Serial quiet ${quietSec}s); leaving this session running",
                     )
                     break
                 }
                 engine.appendNote(
                     serial,
-                    "[nimbus] auto-fallback: no kernel after ${elapsedSec}s on ${profile.id}; restarting with ${next.describe()}",
+                    "[nimbus] auto-fallback: Serial quiet for ${quietSec}s on ${profile.id}; restarting with ${next.describe()}",
                 )
-                // Restart on this same service; startVm stops the current monitor via stopMonitor+gen.
                 try {
                     engine.stop()
                     startVm(id, clearSerial = false, profile = next)
@@ -169,6 +206,30 @@ class VmService : Service() {
             Log.i(TAG, "monitor exit gen=$gen ticks=$ticks running=${engine.isRunning}")
         }, "nimbus-boot-monitor").also { it.isDaemon = true; it.start() }
     }
+
+    /** @return non-black count, total pixels, width, height */
+    private fun countNonBlackPixels(file: File): Quad? {
+        if (!file.exists() || file.length() < 32) return null
+        val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        try {
+            val w = bmp.width
+            val h = bmp.height
+            if (w <= 0 || h <= 0) return null
+            val row = IntArray(w)
+            var n = 0
+            for (y in 0 until h) {
+                bmp.getPixels(row, 0, w, 0, y, w, 1)
+                for (c in row) {
+                    if ((c and 0x00ffffff) != 0) n++
+                }
+            }
+            return Quad(n, w * h, w, h)
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    private data class Quad(val a: Int, val b: Int, val c: Int, val d: Int)
 
     private fun stopMonitor() {
         monitorGen++
