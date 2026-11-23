@@ -162,3 +162,20 @@ API 28 bionic headers do not declare them.
 Scripts, app skeleton, compressed firmware, notes, and patches are the
 source of record. Keystore lives in `signing/` and is gitignored. Release
 asset name (when published): `Nimbus-VM.apk`.
+
+## Repo and APK (2026-11-22, America/Chicago)
+
+- Source: https://github.com/80sghostbuster-png/nimbus-vm
+- Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.1.0-engine
+- Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
+- APK: 34,969,515 bytes, SHA-256 `7966def057638a4e450fbbc8fb72745e501078cc79f20491a4122a8c58ec0821`
+  (GitHub latest-download verified byte-identical).
+- Signed with the project keystore in `signing/` (gitignored, never printed).
+- Package `com.lex.nimbusvm`, minSdk 28, arm64-v8a only.
+- Native libs in the APK: `libqemu-system-aarch64.so` (38 MiB stripped),
+  `libqemu-system-x86_64.so` (32 MiB), `libqemu-img.so` (3.8 MiB),
+  `libnimbusvm.so` (JNI), plus AAVMF/OVMF firmware.
+- Android binaries are ELF aarch64 PIE, interpreter `/system/bin/linker64`,
+  for Android 28, NDK r27d; they only need bionic `libc`/`libm`/`libdl`.
+  User-mode `--version` on the x86 box failed because `/system/bin/linker64`
+  is not present here. Nothing has been run on a real phone.
