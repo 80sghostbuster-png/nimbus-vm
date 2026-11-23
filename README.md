@@ -4,8 +4,11 @@ A free, open-source, native Android app that runs real operating systems
 locally on the phone with QEMU. No cloud, no paid services, no fake
 desktops.
 
-Phase 1 (this tree) is the **virtualization engine**. The full UI
-(install wizard, library, display, keyboard, touch mouse) is Phase 2.
+The app is a simple **Add ISO** flow: pick an image, auto-detect ARM64 vs
+x86-64 and the OS, apply good defaults, and boot fullscreen with a graphical
+display, touch mouse, and on-screen keyboard. Advanced sliders stay optional.
+The Phase 1 engine (QEMU 10.2.4, AAVMF, slirp, 9p) is still what actually runs
+the guest.
 
 ## ARM64 first
 
@@ -39,7 +42,8 @@ Windows media is never bundled.
 
 - `scripts/` — fetch, build, firmware unpack, engine tests
 - `native/` — JNI/C++ control layer and QEMU build trees (local)
-- `app/` — debug APK harness (Phase 1 is a single debug screen)
+- `app/` — Android app (library, Add ISO, fullscreen display, optional advanced settings)
+- `screenshots/` — UI frames and QMP installer proof dumps
 - `firmware/edk2-gz/` — compressed AAVMF/OVMF images
 - `NOTES.md` — work log, test results, known limits
 - `evidence/` — serial logs and summaries from engine tests (local)

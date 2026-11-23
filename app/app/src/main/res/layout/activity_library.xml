@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0E1014"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Nimbus VM"
+        android:textColor="#C7A452"
+        android:textSize="28sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Put an ISO in and let it run. ARM64 first, on this phone."
+        android:textColor="#C8C4BB"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/addIso"
+        android:layout_width="match_parent"
+        android:layout_height="72dp"
+        android:layout_marginTop="24dp"
+        android:backgroundTint="#C7A452"
+        android:text="Add ISO"
+        android:textAllCaps="false"
+        android:textColor="#0E1014"
+        android:textSize="22sp"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/advanced"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:backgroundTint="#2A2D36"
+        android:text="Advanced settings…"
+        android:textAllCaps="false"
+        android:textColor="#F4F1EA" />
+
+    <ProgressBar
+        android:id="@+id/progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:indeterminate="true"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/progressLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="#C7A452"
+        android:visibility="gone" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="Your VMs"
+        android:textColor="#C7A452"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Nothing here yet. Tap Add ISO, pick a Debian, Ubuntu, Kali, or Windows image, and it will boot fullscreen."
+        android:textColor="#8A8680"
+        android:textSize="14sp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/vmList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_weight="1" />
+
+    <TextView
+        android:id="@+id/debugLink"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end"
+        android:padding="8dp"
+        android:text="Engine debug"
+        android:textColor="#5C5850"
+        android:textSize="12sp" />
+</LinearLayout>

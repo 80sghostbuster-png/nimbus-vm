@@ -5,4 +5,5 @@
     <string name="stop_vm">Stop VM</string>
     <string name="powerdown">ACPI shutdown</string>
     <string name="hint">Phase 1 debug harness. This boots real UEFI firmware through QEMU, not a fake desktop.</string>
+    <string name="add_iso">Add ISO</string>
 </resources>

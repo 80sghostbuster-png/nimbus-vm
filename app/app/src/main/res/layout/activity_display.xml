@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <com.lex.nimbusvm.VncView
+        android:id="@+id/screen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:padding="16dp"
+        android:text="Starting…"
+        android:textColor="#F4F1EA"
+        android:textSize="16sp" />
+
+    <LinearLayout
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#CC0E1014"
+        android:gravity="end"
+        android:orientation="horizontal"
+        android:padding="6dp">
+
+        <Button
+            android:id="@+id/btnHide"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:backgroundTint="#2A2D36"
+            android:minWidth="0dp"
+            android:text="Hide"
+            android:textAllCaps="false"
+            android:textColor="#F4F1EA"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnKeyboard"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#C7A452"
+            android:minWidth="0dp"
+            android:text="Keyboard"
+            android:textAllCaps="false"
+            android:textColor="#0E1014"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnPower"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#2A2D36"
+            android:minWidth="0dp"
+            android:text="Power"
+            android:textAllCaps="false"
+            android:textColor="#F4F1EA"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <com.lex.nimbusvm.OnScreenKeyboard
+        android:id="@+id/osk"
+        android:layout_width="match_parent"
+        android:layout_height="240dp"
+        android:layout_gravity="bottom"
+        android:visibility="gone" />
+</FrameLayout>

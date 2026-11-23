@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Phase 2 will add Bluetooth connect/scan for HID forwarding. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" android:usesPermissionFlags="neverForLocation" tools:targetApi="31" />
 
     <application
         android:allowBackup="false"
@@ -12,8 +18,9 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.NimbusVM">
+
         <activity
-            android:name=".DebugActivity"
+            android:name=".LibraryActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout">
             <intent-filter>
@@ -21,8 +28,30 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".DisplayActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout|navigation"
+            android:theme="@style/Theme.NimbusVM"
+            android:windowSoftInputMode="adjustNothing" />
+
+        <activity
+            android:name=".AdvancedActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".DebugActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout" />
+
         <service
             android:name=".VmService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a local QEMU virtual machine" />
+        </service>
     </application>
 </manifest>

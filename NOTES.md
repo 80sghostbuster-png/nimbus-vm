@@ -215,3 +215,42 @@ in the APK (160,768 bytes; AAPT2 stores the decompressed form of the .gz asset).
 - Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.1.1-engine
 - Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
 
+
+## Phase 2 — 0.2.0 (2026-11-22, America/Chicago)
+
+Core flow is now: big **Add ISO** button → Android file picker → auto-detect
+arch from the ISO's EFI boot files (`BOOTAA64.EFI` vs `BOOTX64.EFI`) and OS
+type, pick defaults (RAM ≈ 50% of device RAM with a sensible cap, CPU = big
+cores, 32 GB sparse qcow2 for Linux / 64 GB for Windows, TPM + Secure Boot
+automatically for Windows), create the VM and boot it immediately fullscreen
+on a graphical VNC display (unix socket; not serial). Touch is an absolute
+tablet; an on-screen keyboard and Bluetooth/USB HID keyboards (system
+KeyEvents) type into the guest. Internet (slirp) and a per-VM 9p shared
+folder are on by default.
+
+Advanced settings (RAM/CPU/disk sliders, shared folder, x86-64 toggle, TPM,
+Secure Boot, eject ISO) stay optional. The VM library can re-launch a VM and
+boot from disk after install (ISO ejected). Power menu: shutdown, restart,
+suspend (QMP stop), resume (QMP cont), force stop.
+
+swtpm is started when `libswtpm.so` is present; this APK still does not ship
+an Android-built swtpm, so Windows 11 ARM TPM is wired in the engine but not
+yet proven on device. Distro download presets were deferred until after the
+ISO flow.
+
+Box proof: official `debian-13.8.0-arm64-netinst.iso` (SHA-256
+`f4e05f67b5c74e3ff7b24c2a8f889960f9eb31fe0c1ac8513d27d5656958b6b3`)
+auto-detected as Debian ARM64 via `EFI/BOOT/BOOTAA64.EFI`. The same app argv
+(`-L`, `-vnc unix:…`, virtio-gpu, ISO + 32G disk, slirp, 9p) is booted with
+system QEMU datadirs hidden; QMP screendumps land in `screenshots/`.
+
+UI frames matching the layouts are in `screenshots/01-library-empty.png` etc.
+They were rendered on the box (no Android emulator / phone capture).
+
+Signed APK: 37,355,177 bytes, SHA-256 `6242f1e9c6471df69dd4e62ea2bbf9b3fa01014c9cedd6cc03cb60d765ef2622`.
+Package `com.lex.nimbusvm`, versionCode 3, versionName 0.2.0, signed v2
+with the same project keystore. `assets/qemu-data/efi-virtio.rom` is still bundled.
+
+- Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.2.0
+- Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
+

@@ -14,14 +14,13 @@ import org.json.JSONObject
  * Control layer: start/stop a real QEMU process, talk QMP, unpack firmware and pc-bios.
  * ARM64 is the default. x86_64 is an explicit compatibility (slow) path.
  *
- * QEMU is built with a host-style datadir that does not exist on the phone.
- * Every invocation therefore passes -L <qemuDataDir> and we extract the
- * bundled option ROMs (efi-virtio.rom, vgabios, keymaps, …) there.
- * TEMP/HOME/XDG_* are forced into the app's cache/files dirs — never /tmp.
+ * Every invocation passes -L <qemuDataDir>. TEMP/HOME/XDG_* stay under the
+ * app's cache/files dirs. Graphical boots use a unix-socket VNC display.
  */
 class QemuEngine(private val context: Context) {
 
     data class Config(
+        val vmId: String = "debug",
         val arch: Arch = Arch.ARM64,
         val memoryMb: Int = 1024,
         val cpus: Int = 2,
@@ -30,6 +29,7 @@ class QemuEngine(private val context: Context) {
         val sharedDir: File? = null,
         val tpm: Boolean = false,
         val secureBoot: Boolean = false,
+        val graphics: Boolean = true,
         val extraArgs: List<String> = emptyList(),
     )
 
@@ -38,6 +38,9 @@ class QemuEngine(private val context: Context) {
     var process: Process? = null
         private set
     private var qmpFile: File? = null
+    private var currentWorkDir: File? = null
+    var lastConfig: Config? = null
+        private set
 
     val isRunning: Boolean get() = process?.isAlive == true
 
@@ -58,13 +61,25 @@ class QemuEngine(private val context: Context) {
     /** Versioned QEMU datadir passed as -L. Re-extracted when DATA_PACK_VERSION changes. */
     fun qemuDataDir(): File = File(context.filesDir, "qemu-data/$DATA_PACK_VERSION").apply { mkdirs() }
 
-    fun workDir(): File = File(context.filesDir, "vm").apply { mkdirs() }
+    fun workDir(vmId: String = "debug"): File {
+        val dir = if (vmId == "debug") File(context.filesDir, "vm")
+        else File(context.filesDir, "vms/$vmId")
+        dir.mkdirs()
+        return dir
+    }
 
     fun tmpDir(): File = File(context.cacheDir, "tmp").apply { mkdirs() }
 
     fun runtimeDir(): File = File(context.cacheDir, "runtime").apply { mkdirs() }
 
-    fun qemuLogFile(): File = File(workDir(), "qemu-stderr.log")
+    fun qemuLogFile(vmId: String = lastConfig?.vmId ?: "debug"): File =
+        File(workDir(vmId), "qemu-stderr.log")
+
+    fun vncSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
+        File(workDir(vmId), "vnc.sock")
+
+    fun qmpSock(vmId: String = lastConfig?.vmId ?: "debug"): File =
+        File(workDir(vmId), "qmp.sock")
 
     fun unpackAll() {
         unpackFirmware()
@@ -152,11 +167,12 @@ class QemuEngine(private val context: Context) {
         }
     }
 
-    fun applyQemuEnv(pb: ProcessBuilder) {
+    fun applyQemuEnv(pb: ProcessBuilder, vmId: String = "debug") {
         val env = pb.environment()
         val tmp = tmpDir()
         val runtime = runtimeDir()
-        env["HOME"] = workDir().absolutePath
+        val home = workDir(vmId)
+        env["HOME"] = home.absolutePath
         env["TMPDIR"] = tmp.absolutePath
         env["TMP"] = tmp.absolutePath
         env["TEMP"] = tmp.absolutePath
@@ -164,17 +180,16 @@ class QemuEngine(private val context: Context) {
         env["XDG_RUNTIME_DIR"] = runtime.absolutePath
         env["XDG_DATA_HOME"] = File(context.filesDir, "xdg-data").apply { mkdirs() }.absolutePath
         env["XDG_CONFIG_HOME"] = File(context.filesDir, "xdg-config").apply { mkdirs() }.absolutePath
-        // Prevent a leftover host datadir baked into the binary from being used
-        // if someone happens to have one; -L is still the authoritative path.
         env.remove("QEMU_DATA_DIR")
-        pb.directory(workDir())
+        pb.directory(home)
     }
 
-    fun buildArgv(cfg: Config, serialFile: File, qmp: File): List<String> {
+    fun buildArgv(cfg: Config, serialFile: File, qmp: File, vnc: File? = null): List<String> {
         val qemu = qemuBinary(cfg.arch)
         require(qemu.exists()) { "QEMU binary missing: ${qemu.absolutePath}" }
         val fw = firmwareDir()
         val data = qemuDataDir()
+        val work = workDir(cfg.vmId)
         val args = mutableListOf(
             qemu.absolutePath,
             "-L", data.absolutePath,
@@ -192,6 +207,12 @@ class QemuEngine(private val context: Context) {
             "-device", "usb-kbd,bus=xhci.0",
             "-device", "usb-tablet,bus=xhci.0",
         )
+        if (cfg.graphics) {
+            val sock = vnc ?: File(work, "vnc.sock")
+            if (sock.exists()) sock.delete()
+            args += listOf("-vnc", "unix:${sock.absolutePath}")
+        }
+        args += if (cfg.iso != null) listOf("-boot", "order=cd") else listOf("-boot", "order=c")
         when (cfg.arch) {
             Arch.ARM64 -> {
                 args += listOf(
@@ -201,14 +222,14 @@ class QemuEngine(private val context: Context) {
                 )
                 val code = if (cfg.secureBoot) "AAVMF_CODE.secboot.fd" else "AAVMF_CODE.fd"
                 val varsTemplate = if (cfg.secureBoot) "AAVMF_VARS.ms.fd" else "AAVMF_VARS.fd"
-                val vars = File(workDir(), "vars-arm64.fd")
+                val vars = File(work, "vars-arm64.fd")
                 if (!vars.exists()) File(fw, varsTemplate).copyTo(vars, overwrite = false)
                 args += listOf(
                     "-drive", "if=pflash,format=raw,readonly=on,file=${File(fw, code).absolutePath}",
-                    "-drive", "if=pflash,format=qcow2,file=${ensureQcowVars(vars).absolutePath}",
+                    "-drive", "if=pflash,format=qcow2,file=${ensureQcowVars(vars, cfg.vmId).absolutePath}",
                 )
                 if (cfg.tpm) {
-                    val sock = File(workDir(), "swtpm.sock")
+                    val sock = File(work, "swtpm.sock")
                     args += listOf(
                         "-chardev", "socket,id=chrtpm,path=${sock.absolutePath}",
                         "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
@@ -224,14 +245,14 @@ class QemuEngine(private val context: Context) {
                 )
                 val code = if (cfg.secureBoot) "OVMF_CODE_4M.secboot.fd" else "OVMF_CODE_4M.fd"
                 val varsTemplate = if (cfg.secureBoot) "OVMF_VARS_4M.ms.fd" else "OVMF_VARS_4M.fd"
-                val vars = File(workDir(), "vars-x64.fd")
+                val vars = File(work, "vars-x64.fd")
                 if (!vars.exists()) File(fw, varsTemplate).copyTo(vars, overwrite = false)
                 args += listOf(
                     "-drive", "if=pflash,format=raw,readonly=on,file=${File(fw, code).absolutePath}",
-                    "-drive", "if=pflash,format=raw,file=${vars.absolutePath}",
+                    "-drive", "if=pflash,format=qcow2,file=${ensureQcowVars(vars, cfg.vmId).absolutePath}",
                 )
                 if (cfg.tpm) {
-                    val sock = File(workDir(), "swtpm.sock")
+                    val sock = File(work, "swtpm.sock")
                     args += listOf(
                         "-chardev", "socket,id=chrtpm,path=${sock.absolutePath}",
                         "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
@@ -260,8 +281,8 @@ class QemuEngine(private val context: Context) {
         return args
     }
 
-    private fun ensureQcowVars(rawVars: File): File {
-        val qcow = File(workDir(), rawVars.nameWithoutExtension + ".qcow2")
+    private fun ensureQcowVars(rawVars: File, vmId: String): File {
+        val qcow = File(workDir(vmId), rawVars.nameWithoutExtension + ".qcow2")
         if (!qcow.exists()) {
             val img = qemuImg()
             if (img.exists()) {
@@ -269,7 +290,7 @@ class QemuEngine(private val context: Context) {
                     img.absolutePath, "create", "-f", "qcow2", "-F", "raw",
                     "-b", rawVars.absolutePath, qcow.absolutePath,
                 )
-                applyQemuEnv(pb)
+                applyQemuEnv(pb, vmId)
                 pb.redirectErrorStream(true)
                 pb.start().waitFor()
             } else {
@@ -279,14 +300,15 @@ class QemuEngine(private val context: Context) {
         return if (qcow.exists()) qcow else rawVars
     }
 
-    fun createDisk(file: File, sizeGb: Int) {
+    fun createDisk(file: File, sizeGb: Int, vmId: String = "debug") {
         val img = qemuImg()
         require(img.exists()) { "qemu-img missing at ${img.absolutePath}" }
         file.parentFile?.mkdirs()
+        if (file.exists() && file.length() > 0) return
         val pb = ProcessBuilder(
             img.absolutePath, "create", "-f", "qcow2", file.absolutePath, "${sizeGb}G",
         )
-        applyQemuEnv(pb)
+        applyQemuEnv(pb, vmId)
         pb.redirectErrorStream(true)
         val proc = pb.start()
         val out = proc.inputStream.bufferedReader().readText()
@@ -296,14 +318,22 @@ class QemuEngine(private val context: Context) {
     fun start(cfg: Config, serialFile: File): Process {
         stop()
         unpackAll()
-        qmpFile = File(workDir(), "qmp.sock").also { if (it.exists()) it.delete() }
-        val log = qemuLogFile()
+        lastConfig = cfg
+        currentWorkDir = workDir(cfg.vmId)
+        qmpFile = File(currentWorkDir, "qmp.sock").also { if (it.exists()) it.delete() }
+        val vnc = File(currentWorkDir, "vnc.sock").also { if (it.exists()) it.delete() }
+        val log = qemuLogFile(cfg.vmId)
         log.writeText("")
-        val argv = buildArgv(cfg, serialFile, qmpFile!!)
+        val swtpm = if (cfg.tpm) startSwtpm(cfg.vmId) else null
+        if (cfg.tpm && swtpm == null) {
+            Log.w(TAG, "swtpm not available; starting without TPM")
+        }
+        val effective = if (cfg.tpm && swtpm == null) cfg.copy(tpm = false) else cfg
+        val argv = buildArgv(effective, serialFile, qmpFile!!, vnc)
         Log.i(TAG, "argv: ${argv.joinToString(" ")}")
         log.appendText("argv: ${argv.joinToString(" ")}\n")
         val pb = ProcessBuilder(argv)
-        applyQemuEnv(pb)
+        applyQemuEnv(pb, cfg.vmId)
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         val proc = pb.start()
@@ -311,8 +341,38 @@ class QemuEngine(private val context: Context) {
         return proc
     }
 
+    /** Start bundled swtpm if present (libswtpm.so). Returns the process, or null. */
+    private fun startSwtpm(vmId: String): Process? {
+        val bin = File(nativeDir(), "libswtpm.so")
+        if (!bin.exists()) return null
+        val work = workDir(vmId)
+        val state = File(work, "tpm").apply { mkdirs() }
+        val sock = File(work, "swtpm.sock")
+        if (sock.exists()) sock.delete()
+        val pb = ProcessBuilder(
+            bin.absolutePath, "socket",
+            "--tpm2",
+            "--tpmstate", "dir=${state.absolutePath}",
+            "--ctrl", "type=unixio,path=${sock.absolutePath}",
+            "--daemon=no",
+        )
+        applyQemuEnv(pb, vmId)
+        pb.redirectErrorStream(true)
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(File(work, "swtpm.log")))
+        return try {
+            pb.start()
+        } catch (e: Exception) {
+            Log.w(TAG, "swtpm failed to start: $e")
+            null
+        }
+    }
+
     fun qmp(execute: String, arguments: JSONObject? = null): String {
         val sock = qmpFile ?: error("no QMP socket")
+        return qmpAt(sock, execute, arguments)
+    }
+
+    fun qmpAt(sock: File, execute: String, arguments: JSONObject? = null): String {
         LocalSocket().use { ls ->
             ls.connect(LocalSocketAddress(sock.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
             val input = ls.inputStream
@@ -332,6 +392,10 @@ class QemuEngine(private val context: Context) {
     fun reset() = qmp("system_reset")
     fun pause() = qmp("stop")
     fun resume() = qmp("cont")
+    fun screendump(dest: File): String {
+        dest.parentFile?.mkdirs()
+        return qmp("screendump", JSONObject().put("filename", dest.absolutePath).put("format", "png"))
+    }
 
     fun stop() {
         process?.let { p ->
@@ -344,6 +408,7 @@ class QemuEngine(private val context: Context) {
             }
         }
         process = null
+        lastConfig = null
     }
 
     private fun writeJson(output: java.io.OutputStream, obj: JSONObject) {
