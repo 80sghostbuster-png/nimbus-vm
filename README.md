@@ -6,7 +6,8 @@ desktops.
 
 The app is a simple **Add ISO** flow: pick an image, auto-detect ARM64 vs
 x86-64 and the OS, apply good defaults, and boot fullscreen with a graphical
-display, touch mouse, and on-screen keyboard. Advanced sliders stay optional.
+display, direct touch (long-press, scroll, pinch-zoom the viewer),
+and an on-screen keyboard. Advanced sliders stay optional.
 The Phase 1 engine (QEMU 10.2.4, AAVMF, slirp, 9p) is still what actually runs
 the guest.
 
@@ -29,7 +30,7 @@ Defaults for ARM64 guests (also used in the engine tests):
 - `-cpu max` on `virt,gic-version=3`
 - virtio-blk (`cache=writeback,aio=threads,discard=unmap`)
 - virtio-net with slirp (user-mode networking / internet)
-- virtio-gpu, qemu-xhci + usb-kbd + usb-tablet
+- virtio-gpu (VNC bound to `gpu0`), qemu-xhci + usb-kbd + usb-tablet, virtio-multitouch
 - virtio-9p shared folders
 - AAVMF UEFI; `tpm-tis-device` + swtpm for Windows 11 on ARM
 

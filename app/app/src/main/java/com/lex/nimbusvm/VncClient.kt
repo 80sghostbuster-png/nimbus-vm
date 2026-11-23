@@ -6,13 +6,14 @@ import android.net.LocalSocketAddress
 import android.util.Log
 import java.io.DataInputStream
 import java.io.OutputStream
-import java.util.concurrent.atomic.AtomicBoolean
 import java.net.Socket
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Minimal RFB 3.8 client (None auth, Raw + CopyRect + DesktopSize) for QEMU's VNC display.
+ * Minimal RFB 3.8 client (None auth) for QEMU's VNC display.
+ * Encodings: Raw, CopyRect, DesktopSize, ExtendedDesktopSize, LastRect, Cursor.
+ * After a resize the client always asks for a full framebuffer, not just an
+ * incremental update — otherwise the viewer can stick on the last placeholder.
  */
 class VncClient(
     private val unixPath: String? = null,
@@ -84,11 +85,20 @@ class VncClient(
         write(buf)
     }
 
+    /** VNC button bits: 1 left, 2 middle, 4 right, 8 wheel-up, 16 wheel-down. */
+    fun sendClick(x: Int, y: Int, buttonBit: Int) {
+        sendPointer(x, y, buttonBit)
+        sendPointer(x, y, 0)
+    }
+
+    fun sendScroll(x: Int, y: Int, wheelUp: Boolean) {
+        sendClick(x, y, if (wheelUp) 8 else 16)
+    }
+
     fun sendKey(keysym: Int, down: Boolean) {
         val buf = ByteArray(8)
         buf[0] = 4
         buf[1] = if (down) 1 else 0
-        // 2 bytes padding
         buf[4] = (keysym shr 24).toByte()
         buf[5] = (keysym shr 16).toByte()
         buf[6] = (keysym shr 8).toByte()
@@ -105,6 +115,8 @@ class VncClient(
         buf[8] = (fbH shr 8).toByte(); buf[9] = fbH.toByte()
         write(buf)
     }
+
+    fun requestFullUpdate() = requestUpdate(false)
 
     private fun handshake() {
         val inn = input ?: error("not connected")
@@ -141,7 +153,6 @@ class VncClient(
         val nameBuf = ByteArray(nameLen)
         inn.readFully(nameBuf)
         val name = String(nameBuf, Charsets.UTF_8)
-        // Force 32bpp little-endian RGB so our raw decoder is simple
         setPixelFormat()
         setEncodings()
         allocFb(fbW, fbH)
@@ -156,10 +167,10 @@ class VncClient(
         buf[5] = 24 // depth
         buf[6] = 0 // little endian
         buf[7] = 1 // true colour
-        buf[8] = 0; buf[9] = 255.toByte() // rmax
+        buf[8] = 0; buf[9] = 255.toByte()
         buf[10] = 0; buf[11] = 255.toByte()
         buf[12] = 0; buf[13] = 255.toByte()
-        buf[14] = 16 // rshift
+        buf[14] = 16
         buf[15] = 8
         buf[16] = 0
         write(buf)
@@ -169,7 +180,8 @@ class VncClient(
     }
 
     private fun setEncodings() {
-        val enc = intArrayOf(0, 1, -223) // raw, copyrect, desktop size
+        // raw, copyrect, desktop size, extended desktop size, lastrect, rich cursor
+        val enc = intArrayOf(0, 1, -223, -308, -224, -239)
         val buf = ByteArray(4 + enc.size * 4)
         buf[0] = 2
         buf[2] = (enc.size shr 8).toByte(); buf[3] = enc.size.toByte()
@@ -195,7 +207,7 @@ class VncClient(
                 val type = inn.readUnsignedByte()
                 when (type) {
                     0 -> readFramebufferUpdate(inn)
-                    1 -> { // SetColourMapEntries
+                    1 -> {
                         inn.readByte()
                         inn.readUnsignedShort()
                         val n = inn.readUnsignedShort()
@@ -224,7 +236,9 @@ class VncClient(
         inn.readByte()
         val nRects = inn.readUnsignedShort()
         var dirty = false
-        repeat(nRects) {
+        var resized = false
+        var i = 0
+        while (i < nRects) {
             val x = inn.readUnsignedShort()
             val y = inn.readUnsignedShort()
             val w = inn.readUnsignedShort()
@@ -233,16 +247,47 @@ class VncClient(
             when (encoding) {
                 0 -> { readRaw(inn, x, y, w, h); dirty = true }
                 1 -> { copyRect(inn, x, y, w, h); dirty = true }
-                -223 -> { allocFb(w, h); dirty = true }
-                else -> error("unsupported VNC encoding $encoding")
+                -223 -> {
+                    allocFb(w, h)
+                    resized = true
+                    dirty = true
+                }
+                -308 -> {
+                    // ExtendedDesktopSize: 1 byte screen count, 1 pad, 16 bytes per screen
+                    val nscr = inn.readUnsignedByte()
+                    inn.readByte()
+                    inn.skipBytes(nscr * 16)
+                    if (w != fbW || h != fbH) allocFb(w, h)
+                    resized = true
+                    dirty = true
+                }
+                -224 -> { // LastRect — remainder of this FBU is empty
+                    i = nRects
+                }
+                -239 -> {
+                    // Rich cursor: pixel data + bitmask
+                    inn.skipBytes(w * h * 4)
+                    inn.skipBytes(((w + 7) / 8) * h)
+                }
+                -240 -> {
+                    inn.skipBytes(6)
+                    inn.skipBytes(((w + 7) / 8) * h * 2)
+                }
+                else -> {
+                    Log.w(TAG, "unsupported VNC encoding $encoding; requesting a full refresh")
+                    // We cannot skip an unknown payload safely. Drop this connection
+                    // after asking the activity to retry via onDisconnected.
+                    throw IllegalStateException("unsupported VNC encoding $encoding")
+                }
             }
+            i++
         }
         if (dirty) {
             val bmp = fb ?: return
             bmp.setPixels(pixels, 0, fbW, 0, 0, fbW, fbH)
             listener.onFrame(bmp, fbW, fbH)
         }
-        requestUpdate(true)
+        requestUpdate(!resized)
     }
 
     private fun readRaw(inn: DataInputStream, x: Int, y: Int, w: Int, h: Int) {

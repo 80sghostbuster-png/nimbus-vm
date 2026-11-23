@@ -8,6 +8,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.GZIPInputStream
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -37,6 +38,7 @@ class QemuEngine(private val context: Context) {
 
     var process: Process? = null
         private set
+    private var swtpmProcess: Process? = null
     private var qmpFile: File? = null
     private var currentWorkDir: File? = null
     var lastConfig: Config? = null
@@ -206,19 +208,22 @@ class QemuEngine(private val context: Context) {
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0",
             "-device", "usb-tablet,bus=xhci.0",
+            "-device", "virtio-multitouch-pci,id=touch0",
         )
-        if (cfg.graphics) {
+        // Bind VNC after the GPU is on the argv so display=gpu0 can resolve,
+        // and attach it at the end of buildArgv (see below).
+        val vncSock = if (cfg.graphics) {
             val sock = vnc ?: File(work, "vnc.sock")
             if (sock.exists()) sock.delete()
-            args += listOf("-vnc", "unix:${sock.absolutePath}")
-        }
+            sock
+        } else null
         args += if (cfg.iso != null) listOf("-boot", "order=cd") else listOf("-boot", "order=c")
         when (cfg.arch) {
             Arch.ARM64 -> {
                 args += listOf(
                     "-machine", "virt,gic-version=3,virtualization=off,acpi=on",
                     "-cpu", "max",
-                    "-device", "virtio-gpu-pci",
+                    "-device", "virtio-gpu-pci,id=gpu0,xres=1280,yres=800",
                 )
                 val code = if (cfg.secureBoot) "AAVMF_CODE.secboot.fd" else "AAVMF_CODE.fd"
                 val varsTemplate = if (cfg.secureBoot) "AAVMF_VARS.ms.fd" else "AAVMF_VARS.fd"
@@ -241,7 +246,7 @@ class QemuEngine(private val context: Context) {
                 args += listOf(
                     "-machine", "q35,accel=tcg",
                     "-cpu", "qemu64",
-                    "-device", "virtio-vga",
+                    "-device", "virtio-vga,id=gpu0",
                 )
                 val code = if (cfg.secureBoot) "OVMF_CODE_4M.secboot.fd" else "OVMF_CODE_4M.fd"
                 val varsTemplate = if (cfg.secureBoot) "OVMF_VARS_4M.ms.fd" else "OVMF_VARS_4M.fd"
@@ -276,6 +281,10 @@ class QemuEngine(private val context: Context) {
                 "-fsdev", "local,id=fsdev0,path=${it.absolutePath},security_model=none",
                 "-device", "virtio-9p-pci,fsdev=fsdev0,mount_tag=share",
             )
+        }
+        // VNC last so display=gpu0 refers to the GPU we just added.
+        vncSock?.let {
+            args += listOf("-vnc", "unix:${it.absolutePath},display=gpu0")
         }
         args += cfg.extraArgs
         return args
@@ -324,7 +333,9 @@ class QemuEngine(private val context: Context) {
         val vnc = File(currentWorkDir, "vnc.sock").also { if (it.exists()) it.delete() }
         val log = qemuLogFile(cfg.vmId)
         log.writeText("")
+        stopSwtpm()
         val swtpm = if (cfg.tpm) startSwtpm(cfg.vmId) else null
+        swtpmProcess = swtpm
         if (cfg.tpm && swtpm == null) {
             Log.w(TAG, "swtpm not available; starting without TPM")
         }
@@ -349,18 +360,31 @@ class QemuEngine(private val context: Context) {
         val state = File(work, "tpm").apply { mkdirs() }
         val sock = File(work, "swtpm.sock")
         if (sock.exists()) sock.delete()
+        val log = File(work, "swtpm.log")
         val pb = ProcessBuilder(
             bin.absolutePath, "socket",
             "--tpm2",
             "--tpmstate", "dir=${state.absolutePath}",
             "--ctrl", "type=unixio,path=${sock.absolutePath}",
-            "--daemon=no",
+            "--log", "file=${log.absolutePath}",
         )
         applyQemuEnv(pb, vmId)
         pb.redirectErrorStream(true)
-        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(File(work, "swtpm.log")))
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(File(work, "swtpm-stderr.log")))
         return try {
-            pb.start()
+            val proc = pb.start()
+            // Wait briefly for the control socket; QEMU will fail immediately if it is missing.
+            repeat(50) {
+                if (!proc.isAlive) {
+                    Log.w(TAG, "swtpm exited early: ${log.takeIf { it.exists() }?.readText()?.takeLast(1000)}")
+                    return null
+                }
+                if (sock.exists()) return proc
+                Thread.sleep(100)
+            }
+            Log.w(TAG, "swtpm socket did not appear")
+            proc.destroy()
+            null
         } catch (e: Exception) {
             Log.w(TAG, "swtpm failed to start: $e")
             null
@@ -397,6 +421,66 @@ class QemuEngine(private val context: Context) {
         return qmp("screendump", JSONObject().put("filename", dest.absolutePath).put("format", "png"))
     }
 
+    /**
+     * Forward Android pointers to virtio-multitouch-pci (id=touch0) via QMP.
+     * Coordinates are framebuffer pixels; they are scaled to QEMU's 0..0x7fff abs range.
+     * [contacts] is the full current set of active slots (empty = all up).
+     */
+    data class TouchContact(
+        val slot: Int,
+        val trackingId: Int,
+        val x: Int,
+        val y: Int,
+        /** begin, update, or end */
+        val phase: String,
+    )
+
+    fun sendMultitouch(contacts: List<TouchContact>, fbW: Int, fbH: Int) {
+        if (fbW <= 0 || fbH <= 0) return
+        val events = JSONArray()
+        val maxX = (fbW - 1).coerceAtLeast(1)
+        val maxY = (fbH - 1).coerceAtLeast(1)
+        fun absX(x: Int) = (x.coerceIn(0, maxX) * 0x7FFF) / maxX
+        fun absY(y: Int) = (y.coerceIn(0, maxY) * 0x7FFF) / maxY
+        fun mtt(type: String, slot: Int, trackingId: Int, axis: String, value: Int) {
+            events.put(
+                JSONObject()
+                    .put("type", "mtt")
+                    .put(
+                        "data",
+                        JSONObject()
+                            .put("type", type)
+                            .put("slot", slot)
+                            .put("tracking-id", trackingId)
+                            .put("axis", axis)
+                            .put("value", value),
+                    ),
+            )
+        }
+        if (contacts.isEmpty()) {
+            mtt("end", 0, -1, "x", 0)
+        } else {
+            for (c in contacts) {
+                if (c.phase == "end") {
+                    mtt("end", c.slot, -1, "x", 0)
+                } else {
+                    val typ = if (c.phase == "begin") "begin" else "update"
+                    mtt(typ, c.slot, c.trackingId, "x", 0)
+                    mtt("data", c.slot, c.trackingId, "x", absX(c.x))
+                    mtt("data", c.slot, c.trackingId, "y", absY(c.y))
+                }
+            }
+        }
+        // Do not pass device=touch0: QEMU treats that argument as a *display*
+        // console name and qemu_console_lookup_by_device() aborts on the
+        // serial text console (missing "device" link). The mtt events still
+        // reach virtio-multitouch-pci because it is the only MTT handler.
+        qmp(
+            "input-send-event",
+            JSONObject().put("events", events),
+        )
+    }
+
     fun stop() {
         process?.let { p ->
             if (p.isAlive) {
@@ -409,6 +493,17 @@ class QemuEngine(private val context: Context) {
         }
         process = null
         lastConfig = null
+        stopSwtpm()
+    }
+
+    private fun stopSwtpm() {
+        swtpmProcess?.let { p ->
+            if (p.isAlive) {
+                p.destroy()
+                if (!p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly()
+            }
+        }
+        swtpmProcess = null
     }
 
     private fun writeJson(output: java.io.OutputStream, obj: JSONObject) {

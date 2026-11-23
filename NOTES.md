@@ -254,3 +254,63 @@ with the same project keystore. `assets/qemu-data/efi-virtio.rom` is still bundl
 - Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.2.0
 - Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk
 
+## Hotfix 0.2.1 (2026-11-22, America/Chicago)
+
+Phone bug on 0.2.0: official Kali ARM64 installer ISO copied and booted, the
+fullscreen viewer opened, but the display stayed on QEMU's centered text
+"Display output is not active."
+
+Box investigation with the exact 0.2.0 argv (`-display none`, `-vnc unix:…`,
+`virtio-gpu-pci`) against Debian 13.8.0 arm64 netinst and official
+`kali-linux-2026.3-installer-arm64.iso` (SHA-256
+`c4a7f9bf3a0ff07c8263fe9e9b0edba0cc3d9b408f1d8f06c066df0afce23072`):
+
+- That string is QEMU's virtio-gpu reset placeholder (the installer kernel
+  binds the GPU and clears scanout). It is *not* a VNC socket failure.
+- The same unix VNC path the app uses (RFB raw + CopyRect + DesktopSize)
+  shows GNU GRUB and, once scanout returns, the Debian GTK "Select a language"
+  screen. QMP screendumps match the VNC frames.
+- 0.2.0 never asked for a full framebuffer after a DesktopSize resize, so
+  the viewer could stay on the placeholder even after the guest recovered.
+- Kali GRUB (`GNU GRUB version 2.14-2+kali1`, Install / Graphical install)
+  is visible on that VNC path with the 0.2.1 argv. After the installer kernel
+  starts, the display can stay black / on the placeholder for a long time
+  under TCG while d-i is already talking on serial — which is why the
+  overlay and the live serial log matter.
+
+Fixes in 0.2.1 (`versionCode` 4):
+
+- Bind VNC to the GPU explicitly: `-device virtio-gpu-pci,id=gpu0,xres=1280,yres=800`
+  and `-vnc unix:…,display=gpu0` (x86 uses `virtio-vga,id=gpu0`).
+- VNC client requests a full refresh after a resize, understands
+  ExtendedDesktopSize / LastRect / Cursor so it does not drop the session,
+  and periodically forces a full update (every 2s while the placeholder is
+  showing, every 10s otherwise).
+- "Booting… (firmware)" overlay while the frame is still the placeholder
+  or a blank scanout, with a **Serial** toggle that tails the live firmware
+  and installer log.
+- First-class touch (default **Touch**): tap = left click at the finger via
+  usb-tablet absolute coordinates (letterbox, viewer zoom and pan are
+  mapped correctly), long-press = right click, two-finger drag = scroll,
+  pinch = zoom the viewer. **Trackpad** and **Multitouch** cycle on the
+  toolbar button (long-press the button to reset viewer zoom). Hidden
+  toolbar comes back with a tap along the top edge.
+- Linux guest multi-touch: `-device virtio-multitouch-pci,id=touch0` and
+  QMP `input-send-event` of type `mtt` (absolute range 0..0x7fff). Do **not**
+  pass `device=touch0` — QEMU treats that argument as a display console name
+  and `qemu_console_lookup_by_device()` can abort on the serial text console
+  (`Property 'qemu-fixed-text-console.device' not found`).
+
+Box-proven with the 0.2.1 argv: Debian GRUB + GTK installer and Kali GRUB
+on the exact VNC path; QMP `input-send-event` mtt accepted and QEMU stayed
+running. Not yet tested on a real phone. The 0.3.0 work (Android swtpm,
+distro presets, 9p proof, x86 smoke, gamepad, migrate) is still unfinished
+and is not in this hotfix.
+
+Signed APK: 39,138,720 bytes, SHA-256
+`fcbf262b5ad863e31ae09bae9648993510ae62bd39cb1d0c328997f05e868a61`.
+Package `com.lex.nimbusvm`, versionCode 4, versionName 0.2.1, signed v2
+with the same project keystore.
+
+- Release: https://github.com/80sghostbuster-png/nimbus-vm/releases/tag/v0.2.1
+- Stable download: https://github.com/80sghostbuster-png/nimbus-vm/releases/latest/download/Nimbus-VM.apk

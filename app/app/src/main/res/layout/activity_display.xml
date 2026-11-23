@@ -21,6 +21,36 @@
         android:textSize="16sp" />
 
     <LinearLayout
+        android:id="@+id/bootOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="8dp"
+        android:background="#CC0E1014"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/bootOverlayTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Booting… (firmware)"
+            android:textColor="#C7A452"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/bootOverlayBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Guest display is not active yet. The machine is still booting — open Serial for the live firmware and installer log."
+            android:textColor="#F4F1EA"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <LinearLayout
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -30,41 +60,99 @@
         android:orientation="horizontal"
         android:padding="6dp">
 
-        <Button
-            android:id="@+id/btnHide"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:backgroundTint="#2A2D36"
-            android:minWidth="0dp"
-            android:text="Hide"
-            android:textAllCaps="false"
-            android:textColor="#F4F1EA"
-            android:textSize="12sp" />
+        <HorizontalScrollView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:scrollbars="none">
 
-        <Button
-            android:id="@+id/btnKeyboard"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:layout_marginStart="6dp"
-            android:backgroundTint="#C7A452"
-            android:minWidth="0dp"
-            android:text="Keyboard"
-            android:textAllCaps="false"
-            android:textColor="#0E1014"
-            android:textSize="12sp" />
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnPower"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:layout_marginStart="6dp"
-            android:backgroundTint="#2A2D36"
-            android:minWidth="0dp"
-            android:text="Power"
-            android:textAllCaps="false"
-            android:textColor="#F4F1EA"
-            android:textSize="12sp" />
+                <Button
+                    android:id="@+id/btnHide"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:backgroundTint="#2A2D36"
+                    android:minWidth="0dp"
+                    android:text="Hide"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F1EA"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnTouch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#2A2D36"
+                    android:minWidth="0dp"
+                    android:text="Touch"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F1EA"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnSerial"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#2A2D36"
+                    android:minWidth="0dp"
+                    android:text="Serial"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F1EA"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnKeyboard"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#C7A452"
+                    android:minWidth="0dp"
+                    android:text="Keyboard"
+                    android:textAllCaps="false"
+                    android:textColor="#0E1014"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnPower"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#2A2D36"
+                    android:minWidth="0dp"
+                    android:text="Power"
+                    android:textAllCaps="false"
+                    android:textColor="#F4F1EA"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
     </LinearLayout>
+
+    <ScrollView
+        android:id="@+id/serialPanel"
+        android:layout_width="match_parent"
+        android:layout_height="200dp"
+        android:layout_gravity="bottom"
+        android:background="#E00E1014"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/serialLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:text="Serial log…"
+            android:textColor="#B8C0C8"
+            android:textIsSelectable="true"
+            android:textSize="11sp" />
+    </ScrollView>
 
     <com.lex.nimbusvm.OnScreenKeyboard
         android:id="@+id/osk"
