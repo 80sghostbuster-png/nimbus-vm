@@ -96,6 +96,7 @@ class VncView @JvmOverloads constructor(
     private var scrollAcc = 0f
     private var pinching = false
     private var toolbarEdge = false
+    private var toolbarEdgeY = 0f
 
     /** Trackpad cursor in framebuffer pixels. */
     private var cursorX = 0
@@ -425,21 +426,36 @@ class VncView @JvmOverloads constructor(
     }
 
     private fun toolbarHiddenEdge(event: MotionEvent, action: Int): Boolean {
-        if (!toolbarIsHidden) return false
-        if (action == MotionEvent.ACTION_DOWN && event.y <= dp(48f)) {
-            toolbarEdge = true
+        if (!toolbarIsHidden) {
+            toolbarEdge = false
+            return false
         }
-        if (toolbarEdge && action == MotionEvent.ACTION_UP && event.y <= dp(64f) &&
+        if (action == MotionEvent.ACTION_DOWN && event.y <= dp(44f)) {
+            toolbarEdge = true
+            toolbarEdgeY = event.y
+            return false
+        }
+        if (toolbarEdge && action == MotionEvent.ACTION_MOVE && event.y - toolbarEdgeY >= dp(28f)) {
+            // Swipe down from the top edge brings the toolbar back.
+            toolbarEdge = false
+            handler.removeCallbacks(longPressRunnable)
+            releaseButtons()
+            pointerDown = false
+            dragging = false
+            onRevealToolbar?.invoke()
+            return true
+        }
+        if (toolbarEdge && action == MotionEvent.ACTION_UP && event.y <= dp(56f) &&
             abs(event.x - downX) < touchSlop * 3
         ) {
             toolbarEdge = false
+            handler.removeCallbacks(longPressRunnable)
+            pointerDown = false
             onRevealToolbar?.invoke()
             return true
         }
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            val was = toolbarEdge
             toolbarEdge = false
-            if (was && event.y <= dp(64f)) return false
         }
         return false
     }

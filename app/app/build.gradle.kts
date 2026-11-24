@@ -19,8 +19,8 @@ android {
         applicationId = "com.lex.nimbusvm"
         minSdk = (findProperty("proofMinSdk") as String?)?.toIntOrNull() ?: 28
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.2.9-test"
+        versionCode = 13
+        versionName = "0.2.10-test"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

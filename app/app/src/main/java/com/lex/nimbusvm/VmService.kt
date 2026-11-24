@@ -28,6 +28,8 @@ class VmService : Service() {
         private set
     var currentProfile: BootProfile = BootSettings.defaultProfile
         private set
+    @Volatile var savingState: Boolean = false
+    @Volatile var resumedFromSave: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var monitorGen = 0
     private var monitorThread: Thread? = null
@@ -57,30 +59,70 @@ class VmService : Service() {
         id: String,
         clearSerial: Boolean = true,
         profile: BootProfile = BootSettings.initialProfile(this),
+        fresh: Boolean = false,
     ): Result<Unit> {
+        // Reload store so metadata changed by other activities is current.
+        store = VmStore(this)
         val vm = store.get(id) ?: return Result.failure(IllegalArgumentException("Unknown VM $id"))
         return try {
+            if (fresh && vm.hasSavedState(this)) {
+                discardSavedState(id)
+            }
+            val savedInfo = if (!fresh) vm.savedStateInfo(this) else null
             var cfg = store.toConfig(vm)
-            if (vm.arch == QemuEngine.Arch.ARM64) {
+            val effectiveProfile: BootProfile
+            if (savedInfo != null) {
+                val tag = savedInfo.optString("tag", QemuEngine.SNAPSHOT_TAG)
+                val cpuModel = savedInfo.optString("cpuModel", profile.cpuModel)
+                val tcgThread = savedInfo.optString("tcgThread", profile.tcgThread)
+                val rawVars = savedInfo.optBoolean("rawVars", profile.rawVars)
+                val mem = savedInfo.optInt("memoryMb", vm.memoryMb)
+                val cpus = savedInfo.optInt("cpus", vm.cpus)
+                val isoAttached = savedInfo.optBoolean("isoAttached", vm.isoAttached)
+                val isoFile = vm.isoFile(this).takeIf { isoAttached && it.exists() }
                 cfg = cfg.copy(
-                    cpuModel = profile.cpuModel,
-                    tcgThread = profile.tcgThread,
-                    rawVars = profile.rawVars,
+                    memoryMb = mem,
+                    cpus = cpus,
+                    iso = isoFile,
+                    cpuModel = if (vm.arch == QemuEngine.Arch.ARM64) cpuModel else cfg.cpuModel,
+                    tcgThread = if (vm.arch == QemuEngine.Arch.ARM64) tcgThread else cfg.tcgThread,
+                    rawVars = if (vm.arch == QemuEngine.Arch.ARM64) rawVars else cfg.rawVars,
+                    loadSnapshot = tag,
                 )
+                effectiveProfile = profile.copy(
+                    id = savedInfo.optString("profileId", profile.id),
+                    cpuModel = cpuModel,
+                    tcgThread = tcgThread,
+                    rawVars = rawVars,
+                )
+                resumedFromSave = true
+                lastFbDiag = "guest fb (QMP) resuming…"
+            } else {
+                if (vm.arch == QemuEngine.Arch.ARM64) {
+                    cfg = cfg.copy(
+                        cpuModel = profile.cpuModel,
+                        tcgThread = profile.tcgThread,
+                        rawVars = profile.rawVars,
+                    )
+                }
+                effectiveProfile = profile
+                resumedFromSave = false
+                lastFbDiag = "guest fb (QMP) pending"
             }
             if (cfg.disk != null && !cfg.disk.exists()) engine.createDisk(cfg.disk, vm.diskGb, vm.id)
             val serial = vm.serialFile(this)
             if (clearSerial) serial.writeText("")
-            engine.appendNote(serial, "[nimbus] starting profile ${profile.describe()}")
-            startForeground(NOTIF_ID, notification(vm.name, "Starting…"))
+            val resumeNote = if (resumedFromSave) " (resuming saved state ${cfg.loadSnapshot})" else ""
+            engine.appendNote(serial, "[nimbus] starting profile ${effectiveProfile.describe()}$resumeNote")
+            startForeground(NOTIF_ID, notification(vm.name, if (resumedFromSave) "Resuming…" else "Starting…"))
             acquireWakeLock()
             engine.start(cfg, serial)
             currentId = id
-            currentProfile = profile
+            currentProfile = effectiveProfile
             vm.lastUsedAt = System.currentTimeMillis()
             store.update(vm)
-            startForeground(NOTIF_ID, notification(vm.name, "Running (${profile.id})"))
-            startMonitor(id, serial, profile)
+            startForeground(NOTIF_ID, notification(vm.name, "Running (${effectiveProfile.id})"))
+            startMonitor(id, serial, effectiveProfile)
             Result.success(Unit)
         } catch (e: Exception) {
             stopMonitor()
@@ -96,6 +138,51 @@ class VmService : Service() {
         wakeLock?.let { if (it.isHeld) it.release() }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    fun saveVmState(id: String): QemuEngine.SaveResult {
+        if (!isThisVmRunning(id)) return QemuEngine.SaveResult(false, "VM is not running")
+        val vm = store.get(id) ?: return QemuEngine.SaveResult(false, "Unknown VM $id")
+        val cfg = engine.lastConfig ?: store.toConfig(vm)
+        savingState = true
+        return try {
+            val res = engine.saveSnapshot(QemuEngine.SNAPSHOT_TAG)
+            if (res.ok) {
+                val meta = org.json.JSONObject()
+                    .put("tag", QemuEngine.SNAPSHOT_TAG)
+                    .put("savedAt", System.currentTimeMillis())
+                    .put("profileId", currentProfile.id)
+                    .put("cpuModel", cfg.cpuModel)
+                    .put("tcgThread", cfg.tcgThread)
+                    .put("rawVars", cfg.rawVars)
+                    .put("memoryMb", cfg.memoryMb)
+                    .put("cpus", cfg.cpus)
+                    .put("isoAttached", cfg.iso != null)
+                    .put("vmSize", res.vmSize ?: "")
+                val dest = vm.savedStateFile(this)
+                val tmp = File(dest.parentFile, dest.name + ".tmp")
+                tmp.writeText(meta.toString(2))
+                if (dest.exists()) dest.delete()
+                tmp.renameTo(dest)
+                engine.appendNote(vm.serialFile(this), "[nimbus] saved state (${res.vmSize ?: "ok"})")
+            } else {
+                engine.appendNote(vm.serialFile(this), "[nimbus] save failed: ${res.message}")
+            }
+            res
+        } finally {
+            savingState = false
+        }
+    }
+
+    fun discardSavedState(id: String) {
+        val vm = store.get(id)
+        if (isThisVmRunning(id)) {
+            engine.deleteSnapshotRunning(QemuEngine.SNAPSHOT_TAG)
+        } else {
+            engine.deleteSnapshotOffline(id, vm?.arch ?: QemuEngine.Arch.ARM64, QemuEngine.SNAPSHOT_TAG)
+        }
+        val f = vm?.savedStateFile(this) ?: File(engine.workDir(id), "saved-state.json")
+        if (f.exists()) f.delete()
     }
 
     /** Latest QMP screendump summary for the on-screen diagnostics. */
@@ -128,6 +215,7 @@ class VmService : Service() {
                     break
                 }
                 if (gen != monitorGen || !engine.isRunning) break
+                if (savingState) continue
                 ticks++
                 val now = System.currentTimeMillis()
                 val elapsedSec = (now - startedAt) / 1000
@@ -188,6 +276,7 @@ class VmService : Service() {
                     kernelHinted = true
                 }
                 if (!auto) continue
+                if (resumedFromSave) continue
                 if (painted) continue
                 // Once the kernel runs, never restart on Serial silence: after
                 // "bootconsole [pl11] disabled" a console=tty0 kernel is legitimately

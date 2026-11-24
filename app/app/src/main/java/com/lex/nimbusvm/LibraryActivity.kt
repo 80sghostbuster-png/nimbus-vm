@@ -201,14 +201,16 @@ class LibraryActivity : AppCompatActivity() {
         }
     }
 
-    private fun boot(vm: VmRecord) {
+    private fun boot(vm: VmRecord, fresh: Boolean = false) {
         val i = Intent(this, DisplayActivity::class.java)
             .putExtra(DisplayActivity.EXTRA_VM_ID, vm.id)
             .putExtra(DisplayActivity.EXTRA_START, true)
+            .putExtra(DisplayActivity.EXTRA_FRESH, fresh)
         startActivity(i)
     }
 
     private fun refresh() {
+        store.reload()
         val vms = store.all()
         empty.visibility = if (vms.isEmpty()) View.VISIBLE else View.GONE
         (list.adapter as VmAdapter).items = vms
@@ -263,10 +265,16 @@ class LibraryActivity : AppCompatActivity() {
         override fun getItemCount(): Int = items.size
         override fun onBindViewHolder(holder: VmHolder, position: Int) {
             val vm = items[position]
+            val saveInfo = vm.savedStateInfo(this@LibraryActivity)
             holder.name.text = vm.name
             val iso = if (vm.isoAttached && vm.isoName != null) "ISO attached · ${vm.isoName}" else "Boot from disk"
-            holder.meta.text = "${vm.memoryMb} MB RAM · ${vm.cpus} CPUs · ${vm.diskGb} GB disk · $iso"
-            holder.run.setOnClickListener { boot(vm) }
+            val savePart = if (saveInfo != null) {
+                val sz = saveInfo.optString("vmSize", "").takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""
+                " · Saved state$sz"
+            } else ""
+            holder.meta.text = "${vm.memoryMb} MB RAM · ${vm.cpus} CPUs · ${vm.diskGb} GB disk · $iso$savePart"
+            holder.run.text = if (saveInfo != null) "Resume" else "Run"
+            holder.run.setOnClickListener { boot(vm, fresh = false) }
             holder.itemView.setOnLongClickListener {
                 vmMenu(vm)
                 true
@@ -282,14 +290,64 @@ class LibraryActivity : AppCompatActivity() {
         val more: Button = view.findViewById(R.id.vmMore)
     }
 
+    private fun discardSave(vm: VmRecord, onDone: (() -> Unit)? = null) {
+        setBusy(true, "Discarding saved state…")
+        thread {
+            engine.deleteSnapshotOffline(vm.id, vm.arch, QemuEngine.SNAPSHOT_TAG)
+            val f = vm.savedStateFile(this)
+            if (f.exists()) f.delete()
+            runOnUiThread {
+                setBusy(false, "")
+                refresh()
+                Toast.makeText(this, "Saved state discarded", Toast.LENGTH_SHORT).show()
+                onDone?.invoke()
+            }
+        }
+    }
+
     private fun vmMenu(vm: VmRecord) {
+        val hasSave = vm.hasSavedState(this)
         val ejectLabel = if (vm.isoAttached) "Eject ISO (boot from disk next time)" else "Re-attach ISO"
+        if (hasSave) {
+            val items = arrayOf(
+                "Resume saved state",
+                "Boot fresh (discard save)",
+                "Discard saved state",
+                "Advanced settings",
+                ejectLabel,
+                "Delete",
+            )
+            AlertDialog.Builder(this)
+                .setTitle(vm.name)
+                .setItems(items) { _, which ->
+                    when (which) {
+                        0 -> boot(vm, fresh = false)
+                        1 -> discardSave(vm) { boot(vm, fresh = true) }
+                        2 -> discardSave(vm)
+                        3 -> startActivity(Intent(this, AdvancedActivity::class.java).putExtra(EXTRA_VM_ID, vm.id))
+                        4 -> {
+                            vm.isoAttached = !vm.isoAttached
+                            store.update(vm)
+                            refresh()
+                        }
+                        5 -> {
+                            AlertDialog.Builder(this)
+                                .setMessage("Delete ${vm.name} and its disk?")
+                                .setPositiveButton("Delete") { _, _ -> store.delete(vm.id); refresh() }
+                                .setNegativeButton("Cancel", null)
+                                .show()
+                        }
+                    }
+                }
+                .show()
+            return
+        }
         val items = arrayOf("Run", "Advanced settings", ejectLabel, "Delete")
         AlertDialog.Builder(this)
             .setTitle(vm.name)
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> boot(vm)
+                    0 -> boot(vm, fresh = false)
                     1 -> startActivity(Intent(this, AdvancedActivity::class.java).putExtra(EXTRA_VM_ID, vm.id))
                     2 -> {
                         vm.isoAttached = !vm.isoAttached

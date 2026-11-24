@@ -17,6 +17,7 @@ import android.view.Window
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -32,6 +33,7 @@ class DisplayActivity : AppCompatActivity() {
     private var service: VmService? = null
     private var vmId: String = ""
     private var startOnBind = false
+    private var startFresh = false
     private var vnc: VncClient? = null
     private lateinit var screen: VncView
     private lateinit var osk: OnScreenKeyboard
@@ -48,9 +50,12 @@ class DisplayActivity : AppCompatActivity() {
     private lateinit var btnJumpLatest: Button
     private lateinit var btnTouch: Button
     private lateinit var btnSerial: Button
+    private lateinit var btnSave: Button
+    private lateinit var btnRestoreToolbar: Button
     private var bound = false
     private var placeholder = true
     private var guestPainted = false
+    private var diagPinned: Boolean? = null
     private var userWantsLog = false
     private val ui = Handler(Looper.getMainLooper())
     private var serialFile: File? = null
@@ -114,6 +119,7 @@ class DisplayActivity : AppCompatActivity() {
         applyImmersiveFullscreen()
         vmId = intent.getStringExtra(EXTRA_VM_ID) ?: ""
         startOnBind = intent.getBooleanExtra(EXTRA_START, false)
+        startFresh = intent.getBooleanExtra(EXTRA_FRESH, false)
         screen = findViewById(R.id.screen)
         osk = findViewById(R.id.osk)
         toolbar = findViewById(R.id.toolbar)
@@ -138,16 +144,17 @@ class DisplayActivity : AppCompatActivity() {
         }
         btnTouch = findViewById(R.id.btnTouch)
         btnSerial = findViewById(R.id.btnSerial)
+        btnSave = findViewById(R.id.btnSave)
+        btnRestoreToolbar = findViewById(R.id.btnRestoreToolbar)
 
         findViewById<Button>(R.id.btnKeyboard).setOnClickListener {
             osk.visibility = if (osk.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             layoutSerialAndOsk()
         }
+        btnSave.setOnClickListener { saveStatePrompt() }
         findViewById<Button>(R.id.btnPower).setOnClickListener { powerMenu() }
-        findViewById<Button>(R.id.btnHide).setOnClickListener {
-            toolbar.visibility = View.GONE
-            screen.toolbarIsHidden = true
-        }
+        findViewById<Button>(R.id.btnHide).setOnClickListener { hideToolbar() }
+        btnRestoreToolbar.setOnClickListener { revealToolbar() }
         btnTouch.setOnClickListener {
             val mode = screen.cycleMode()
             btnTouch.text = screen.modeLabel()
@@ -174,10 +181,7 @@ class DisplayActivity : AppCompatActivity() {
             routeOskKeys()
             layoutSerialAndOsk()
         }
-        screen.onRevealToolbar = {
-            toolbar.visibility = View.VISIBLE
-            screen.toolbarIsHidden = false
-        }
+        screen.onRevealToolbar = { revealToolbar() }
         screen.onPlaceholderChanged = { blank ->
             placeholder = blank
             if (!blank) onGuestPainted()
@@ -223,10 +227,40 @@ class DisplayActivity : AppCompatActivity() {
             refreshSerial()
             if (serialFollow) scrollSerialToBottom()
         }
+        applyDiagVisibility()
+    }
+
+    private fun hideToolbar() {
+        toolbar.visibility = View.GONE
+        btnRestoreToolbar.visibility = View.VISIBLE
+        screen.toolbarIsHidden = true
+    }
+
+    private fun revealToolbar() {
+        toolbar.visibility = View.VISIBLE
+        btnRestoreToolbar.visibility = View.GONE
+        screen.toolbarIsHidden = false
+    }
+
+    private fun applyDiagVisibility() {
+        if (userWantsLog) {
+            diag.visibility = View.GONE
+            return
+        }
+        val pinned = diagPinned
+        if (pinned != null) {
+            diag.visibility = if (pinned) View.VISIBLE else View.GONE
+            return
+        }
+        val sec = if (bootStartedAt == 0L) 0L
+            else ((SystemClock.elapsedRealtime() - bootStartedAt) / 1000L).coerceAtLeast(0L)
+        val autoHideAfter = if (service?.resumedFromSave == true) 10L else 30L
+        diag.visibility = if (guestPainted && sec >= autoHideAfter) View.GONE else View.VISIBLE
     }
 
     private fun onGuestPainted() {
         guestPainted = true
+        applyDiagVisibility()
     }
 
     private fun appendLogError(msg: String) {
@@ -377,6 +411,7 @@ class DisplayActivity : AppCompatActivity() {
         val fb = service?.lastFbDiag ?: "guest fb (QMP) pending"
         val view = "view: VNC ${vncW}x${vncH} frames=$vncFrames ${if (placeholder) "blank" else "painted"}"
         diag.text = "$fb\n$view  $elapsed"
+        applyDiagVisibility()
     }
 
     private fun actuallyStart() {
@@ -395,7 +430,8 @@ class DisplayActivity : AppCompatActivity() {
                 tries++
             }
             if (!svc.engine.isRunning) {
-                val r = svc.startVm(vmId)
+                val fresh = startFresh; startFresh = false
+                val r = svc.startVm(vmId, fresh = fresh)
                 if (r.isFailure) {
                     val err = r.exceptionOrNull()?.message ?: "failed"
                     val log = svc.engine.qemuLogFile(vmId).takeIf { it.exists() }?.readText().orEmpty().takeLast(2000)
@@ -461,12 +497,86 @@ class DisplayActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveStatePrompt() {
+        val svc = service ?: return
+        if (!svc.isThisVmRunning(vmId)) {
+            Toast.makeText(this, "VM is not running", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pad = (18 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+        val spinner = ProgressBar(this)
+        val label = TextView(this).apply {
+            text = "Saving VM state…\nWriting memory and disk snapshot."
+            setPadding((14 * resources.displayMetrics.density).toInt(), 0, 0, 0)
+        }
+        box.addView(spinner)
+        box.addView(label)
+        val progressDlg = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Saving VM")
+            .setView(box)
+            .setCancelable(false)
+            .show()
+
+        thread {
+            val res = svc.saveVmState(vmId)
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    runCatching { progressDlg.dismiss() }
+                    if (res.ok) {
+                        val sizePart = res.vmSize?.let { " ($it)" } ?: ""
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("VM state saved")
+                            .setMessage("Saved$sizePart. You can close the app and resume right here later.")
+                            .setPositiveButton("Keep running", null)
+                            .setNegativeButton("Close VM") { _, _ ->
+                                thread {
+                                    svc.stopVm()
+                                    runOnUiThread { finish() }
+                                }
+                            }
+                            .show()
+                    } else {
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("Save failed")
+                            .setMessage(res.message)
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                }
+            }
+        }
+    }
+
     private fun powerMenu() {
         val svc = service ?: return
-        val items = arrayOf("Shutdown", "Restart", "Suspend", "Resume", "Force stop")
+        val hasSave = svc.store.get(vmId)?.hasSavedState(this) == true
+        val diagShown = diag.visibility == View.VISIBLE
+        val diagLabel = if (diagShown) "Hide diagnostics" else "Show diagnostics"
+        val items = mutableListOf("Shutdown", "Restart", "Suspend", "Resume", diagLabel)
+        if (hasSave) items += "Discard saved state"
+        items += "Force stop"
+        val forceIdx = items.lastIndex
+        val discardIdx = if (hasSave) items.indexOf("Discard saved state") else -1
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Power")
-            .setItems(items) { _, which ->
+            .setItems(items.toTypedArray()) { _, which ->
+                if (which == 4) {
+                    diagPinned = !diagShown
+                    applyDiagVisibility()
+                    return@setItems
+                }
+                if (which == discardIdx) {
+                    thread {
+                        svc.discardSavedState(vmId)
+                        runOnUiThread { Toast.makeText(this, "Saved state discarded", Toast.LENGTH_SHORT).show() }
+                    }
+                    return@setItems
+                }
                 thread {
                     val msg = runCatching {
                         when (which) {
@@ -474,12 +584,12 @@ class DisplayActivity : AppCompatActivity() {
                             1 -> svc.engine.reset()
                             2 -> svc.engine.pause()
                             3 -> svc.engine.resume()
-                            4 -> { svc.stopVm(); "stopped" }
+                            forceIdx -> { svc.stopVm(); "stopped" }
                             else -> ""
                         }
                     }.getOrElse { it.toString() }
                     runOnUiThread { Toast.makeText(this, msg.take(80), Toast.LENGTH_SHORT).show() }
-                    if (which == 4) finish()
+                    if (which == forceIdx) finish()
                 }
             }
             .show()
@@ -549,6 +659,7 @@ class DisplayActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_VM_ID = "vm_id"
         const val EXTRA_START = "start"
+        const val EXTRA_FRESH = "fresh"
     }
 }
 

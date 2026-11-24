@@ -27,6 +27,14 @@ data class VmRecord(
     fun isoFile(ctx: Context): File = File(dir(ctx), "cdrom.iso")
     fun shareDir(ctx: Context): File = File(dir(ctx), "share").apply { mkdirs() }
     fun serialFile(ctx: Context): File = File(dir(ctx), "serial.log")
+    fun savedStateFile(ctx: Context): File = File(dir(ctx), "saved-state.json")
+    fun hasSavedState(ctx: Context): Boolean = savedStateFile(ctx).let { it.isFile && it.length() > 2 }
+    fun savedStateInfo(ctx: Context): JSONObject? = try {
+        val f = savedStateFile(ctx)
+        if (f.isFile && f.length() > 2) JSONObject(f.readText()) else null
+    } catch (_: Exception) {
+        null
+    }
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -110,6 +118,8 @@ class VmStore(private val context: Context) {
             graphics = true,
         )
     }
+
+    fun reload() = load()
 
     private fun load() {
         items.clear()

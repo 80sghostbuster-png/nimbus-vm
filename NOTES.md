@@ -1,3 +1,30 @@
+# v0.2.10-test (versionCode 13): save/resume state, floating toolbar handle, diagnostics auto-hide
+
+Tuesday Nov 24, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4.
+
+## What changed
+
+- **VM Save / Resume / Discard:**
+  - Added a `Save` button to the display toolbar. Tapping it opens a progress dialog and saves the full running VM state (CPU, RAM, devices, ramfb, and qcow2 disks/vars) into the internal `nimbus_saved` snapshot via QMP (`savevm`), writing `saved-state.json` with the matching machine layout and snapshot size. Shows clear success (`Close VM` / `Keep running`) or QEMU error failure.
+  - Reopening a VM with a saved state (or tapping **Resume** in `LibraryActivity`) boots QEMU with `-loadvm nimbus_saved` using the saved hardware config and skips auto-fallback restarts.
+  - Added **Discard saved state** and **Boot fresh (discard save)** in `LibraryActivity`'s **More** menu (and **Discard saved state** in `DisplayActivity`'s **Power** menu) to delete the snapshot (`delvm` when running, `qemu-img snapshot -d` when stopped).
+- **Restore hidden toolbar:**
+  - Tapping **Hide** now shows a semi-transparent floating `▼ Toolbar` pill in the top-right corner (`btnRestoreToolbar`). Tapping it or swiping down from the top edge (`VncView.toolbarHiddenEdge`) restores the toolbar.
+- **Diagnostics overlay clean-up:**
+  - `diag` now auto-hides after 30 s once the guest has painted (10 s on resume) and hides when Serial is open, leaving the Kali installer's bottom-left `Screenshot` button uncovered. Added a `Show/Hide diagnostics` toggle in the **Power** menu.
+- **Landscape library layout:**
+  - Added `layout-land/activity_library.xml` (two-column layout) so the VM card's `More` and `Run`/`Resume` buttons stay visible in landscape without scrolling.
+
+## Real-device proof: Firebase Test Lab, physical Pixel 6 (`oriole`, Tensor G1, Android 13), landscape
+
+Tested the released APK (`06fb6d38ab6d06b02d6e741f2316892cbb9e0402b99a961dc0b416cb6b043415`) on physical Pixel 6 (`matrix-2vjrtmcsxohiw`, 305.6 s run duration):
+- Toolbar hidden with floating `▼ Toolbar` handle: `screenshots/v0210-ftl-pixel6-toolbar-hidden.png`
+- Toolbar restored (`Hide`, `Touch`, `Serial`, `Keyboard`, `Save`, `Power`): `screenshots/v0210-ftl-pixel6-toolbar-restored.png`
+- Save completed (`Saved (421 MiB)`): `screenshots/v0210-ftl-pixel6-save-done.png`
+- Library showing `Saved state (421 MiB)` + `Resume`: `screenshots/v0210-ftl-pixel6-library-saved.png`
+- After relaunching `LibraryActivity` and tapping `Resume`, resumed directly to the Kali `"Select a language"` screen with `diag` auto-hidden: `screenshots/v0210-ftl-pixel6-resumed-kali.png`
+- Discarded saved state via `More -> Discard saved state`, returning to `Run`: `screenshots/v0210-ftl-pixel6-discarded.png`
+
 # v0.2.9-test (versionCode 12): black main display fixed, proven on a real Pixel 6
 
 Monday Nov 23, 2026, America/Chicago. **Pre-release only.** `/releases/latest` stays 0.2.4.

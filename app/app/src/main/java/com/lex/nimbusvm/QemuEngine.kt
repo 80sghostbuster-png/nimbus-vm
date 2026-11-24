@@ -35,6 +35,7 @@ class QemuEngine(private val context: Context) {
         val cpuModel: String = BootSettings.defaultProfile.cpuModel,
         val tcgThread: String = BootSettings.defaultProfile.tcgThread,
         val rawVars: Boolean = false,
+        val loadSnapshot: String? = null,
     )
 
     enum class Arch { ARM64, X86_64 }
@@ -366,6 +367,9 @@ class QemuEngine(private val context: Context) {
                 "-append", installer.append,
             )
         }
+        if (!cfg.loadSnapshot.isNullOrBlank()) {
+            args += listOf("-loadvm", cfg.loadSnapshot)
+        }
         args += cfg.extraArgs
         return args
     }
@@ -491,26 +495,32 @@ class QemuEngine(private val context: Context) {
         }
     }
 
-    fun qmp(execute: String, arguments: JSONObject? = null): String {
+    fun qmp(execute: String, arguments: JSONObject? = null, timeoutMs: Int = 15_000): String {
         val sock = qmpFile ?: error("no QMP socket")
-        return qmpAt(sock, execute, arguments)
+        return qmpAt(sock, execute, arguments, timeoutMs)
     }
 
-    fun qmpAt(sock: File, execute: String, arguments: JSONObject? = null): String {
-        val (greeting, cap, result) = qmpRaw(sock, execute, arguments)
+    fun qmpAt(sock: File, execute: String, arguments: JSONObject? = null, timeoutMs: Int = 15_000): String {
+        val (greeting, cap, result) = qmpRaw(sock, execute, arguments, timeoutMs)
         return "greeting=$greeting cap=$cap result=$result"
     }
 
     /** QMP reply object (events are skipped). */
-    fun qmpResult(execute: String, arguments: JSONObject? = null): JSONObject {
+    fun qmpResult(execute: String, arguments: JSONObject? = null, timeoutMs: Int = 15_000): JSONObject {
         val sock = qmpFile ?: error("no QMP socket")
-        val (_, _, result) = qmpRaw(sock, execute, arguments)
+        val (_, _, result) = qmpRaw(sock, execute, arguments, timeoutMs)
         return JSONObject(result)
     }
 
-    private fun qmpRaw(sock: File, execute: String, arguments: JSONObject? = null): Triple<String, String, String> {
+    private fun qmpRaw(
+        sock: File,
+        execute: String,
+        arguments: JSONObject? = null,
+        timeoutMs: Int = 15_000,
+    ): Triple<String, String, String> {
         LocalSocket().use { ls ->
             ls.connect(LocalSocketAddress(sock.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+            if (timeoutMs > 0) ls.soTimeout = timeoutMs
             val input = ls.inputStream
             val output = ls.outputStream
             val greeting = readJsonLine(input)
@@ -623,6 +633,76 @@ class QemuEngine(private val context: Context) {
     fun reset() = qmp("system_reset")
     fun pause() = qmp("stop")
     fun resume() = qmp("cont")
+    data class SaveResult(val ok: Boolean, val message: String, val vmSize: String? = null)
+
+    /**
+     * Save full VM state (CPU, RAM, devices, ramfb, qcow2 disks/vars) into
+     * internal qcow2 snapshot [tag] via HMP `savevm`. Requires qcow2 VARS.
+     */
+    fun saveSnapshot(tag: String = SNAPSHOT_TAG): SaveResult {
+        return try {
+            val res = qmpResult(
+                "human-monitor-command",
+                JSONObject().put("command-line", "savevm $tag"),
+                timeoutMs = 120_000,
+            )
+            if (res.has("error")) {
+                val desc = res.optJSONObject("error")?.optString("desc").orEmpty().ifBlank { res.toString() }
+                return SaveResult(false, desc)
+            }
+            val ret = res.optString("return", "").trim()
+            if (ret.isNotEmpty() && (
+                    ret.contains("error", ignoreCase = true) ||
+                        ret.contains("failed", ignoreCase = true) ||
+                        ret.contains("disabled", ignoreCase = true) ||
+                        ret.contains("cannot", ignoreCase = true) ||
+                        ret.contains("does not support", ignoreCase = true)
+                    )
+            ) {
+                return SaveResult(false, ret)
+            }
+            val info = qmpResult(
+                "human-monitor-command",
+                JSONObject().put("command-line", "info snapshots"),
+                timeoutMs = 15_000,
+            ).optString("return", "")
+            val line = info.lines().firstOrNull { it.contains(tag) }
+                ?: return SaveResult(false, ret.ifEmpty { "Snapshot '$tag' was not created (${info.trim()})" })
+            val size = Regex("""([0-9.]+\s*[KMGTP]i?B)""").find(line)?.groupValues?.get(1)
+            val label = if (size != null) "Saved ($size)" else "Saved"
+            SaveResult(true, label, size)
+        } catch (e: Exception) {
+            SaveResult(false, e.message ?: e.toString())
+        }
+    }
+
+    fun deleteSnapshotRunning(tag: String = SNAPSHOT_TAG): Result<Unit> = runCatching {
+        val res = qmpResult(
+            "human-monitor-command",
+            JSONObject().put("command-line", "delvm $tag"),
+            timeoutMs = 30_000,
+        )
+        if (res.has("error")) error(res.getJSONObject("error").optString("desc", res.toString()))
+    }
+
+    fun deleteSnapshotOffline(vmId: String, arch: Arch, tag: String = SNAPSHOT_TAG) {
+        val img = qemuImg()
+        if (!img.exists()) return
+        val work = workDir(vmId)
+        val varsName = if (arch == Arch.ARM64) "vars-arm64.qcow2" else "vars-x64.qcow2"
+        for (file in listOf(File(work, varsName), File(work, "disk.qcow2"))) {
+            if (!file.exists()) continue
+            runCatching {
+                val pb = ProcessBuilder(img.absolutePath, "snapshot", "-d", tag, file.absolutePath)
+                applyQemuEnv(pb, vmId)
+                pb.redirectErrorStream(true)
+                val proc = pb.start()
+                proc.inputStream.bufferedReader().readText()
+                proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+    }
+
     fun screendump(dest: File): String {
         dest.parentFile?.mkdirs()
         // Default format (PPM): the Android build has no libpng.
@@ -739,5 +819,6 @@ class QemuEngine(private val context: Context) {
         private const val TAG = "NimbusVM"
         /** Bump this whenever bundled pc-bios assets change so they are re-extracted. */
         const val DATA_PACK_VERSION = "2"
+        const val SNAPSHOT_TAG = "nimbus_saved"
     }
 }
